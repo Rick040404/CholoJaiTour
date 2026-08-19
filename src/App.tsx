@@ -14,15 +14,24 @@ import { ContactSection } from './components/ContactSection';
 import { BookingModal } from './components/BookingModal';
 import { AdminPanelModal, NoticeBannerConfig } from './components/AdminPanelModal';
 import { FloatingContactBar } from './components/FloatingContactBar';
-import { Language } from './types';
+import { Language, FleetCar } from './types';
+import { FLEET_CARS } from './data/fleetData';
+import { subscribeToLiveNotice, subscribeToLiveFleet, fetchLiveServerData } from './utils/syncService';
 
 export default function App() {
   const [lang, setLang] = useState<Language>('bn');
   const [isBookingOpen, setIsBookingOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [bookingCar, setBookingCar] = useState<string>('');
+  const [customFleet, setCustomFleet] = useState<FleetCar[]>(() => {
+    const saved = localStorage.getItem('cholo_jai_custom_fleet');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { return FLEET_CARS; }
+    }
+    return FLEET_CARS;
+  });
 
-  // Top Notice Banner state synced with localStorage & server
+  // Top Notice Banner state synced with Firestore & localStorage
   const [noticeConfig, setNoticeConfig] = useState<NoticeBannerConfig>(() => {
     const saved = localStorage.getItem('cholo_jai_notice_banner');
     if (saved) {
@@ -36,17 +45,28 @@ export default function App() {
     };
   });
 
-  // Sync notice from server on mount
+  // Real-time Cloud Synchronization with Firestore for all devices
   useEffect(() => {
-    fetch('/api/notice')
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.notice) {
-          setNoticeConfig(data.notice);
-          localStorage.setItem('cholo_jai_notice_banner', JSON.stringify(data.notice));
-        }
-      })
-      .catch(() => {});
+    // Initial fetch
+    fetchLiveServerData().then(data => {
+      if (data?.notice) {
+        setNoticeConfig(data.notice);
+      }
+    });
+
+    // Real-time Firestore subscriptions (syncs across primary & secondary devices)
+    const unsubNotice = subscribeToLiveNotice((liveNotice) => {
+      if (liveNotice) setNoticeConfig(liveNotice);
+    });
+
+    const unsubFleet = subscribeToLiveFleet((liveFleet) => {
+      if (liveFleet && Array.isArray(liveFleet)) setCustomFleet(liveFleet);
+    });
+
+    return () => {
+      unsubNotice();
+      unsubFleet();
+    };
   }, []);
 
   const handleOpenBooking = (carName?: string) => {

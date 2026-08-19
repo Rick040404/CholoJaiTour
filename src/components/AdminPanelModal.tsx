@@ -22,7 +22,13 @@ import {
   syncUpdateBooking, 
   syncDeleteBooking, 
   syncSaveSchedule, 
-  syncUpdateNotice 
+  syncUpdateNotice,
+  syncSaveFleet,
+  syncSaveAdminPassword,
+  subscribeToLiveBookings,
+  subscribeToLiveSchedules,
+  subscribeToLiveNotice,
+  subscribeToLiveFleet
 } from '../utils/syncService';
 import { InvoiceGenerator } from './InvoiceGenerator';
 
@@ -81,6 +87,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   isOpen,
   onClose,
   lang,
+  onUpdateCars,
   noticeConfig,
   onUpdateNotice,
 }) => {
@@ -228,10 +235,34 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     // Initial fetch on modal open or mount
     syncDataFromServer();
 
-    // Live auto-polling every 4 seconds to sync any edits or new bookings made on other devices
-    const interval = setInterval(() => {
-      syncDataFromServer();
-    }, 4000);
+    // Real-time Firestore snapshot listeners for instant multi-device sync
+    const unsubBookings = subscribeToLiveBookings((liveBookings) => {
+      if (liveBookings) {
+        setBookings(liveBookings);
+        const now = new Date();
+        setLastSyncTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      }
+    });
+
+    const unsubSchedules = subscribeToLiveSchedules((liveSchedules) => {
+      if (liveSchedules) {
+        setScheduleBookings(liveSchedules);
+      }
+    });
+
+    const unsubNotice = subscribeToLiveNotice((liveNotice) => {
+      if (liveNotice) {
+        setNotice(liveNotice);
+        if (onUpdateNotice) onUpdateNotice(liveNotice);
+      }
+    });
+
+    const unsubFleet = subscribeToLiveFleet((liveFleet) => {
+      if (liveFleet && Array.isArray(liveFleet) && liveFleet.length > 0) {
+        setCars(liveFleet);
+        if (onUpdateCars) onUpdateCars(liveFleet);
+      }
+    });
 
     const onFocusOrVisible = () => {
       syncDataFromServer();
@@ -241,7 +272,10 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     document.addEventListener('visibilitychange', onFocusOrVisible);
 
     return () => {
-      clearInterval(interval);
+      unsubBookings();
+      unsubSchedules();
+      unsubNotice();
+      unsubFleet();
       window.removeEventListener('focus', onFocusOrVisible);
       document.removeEventListener('visibilitychange', onFocusOrVisible);
     };
@@ -428,12 +462,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
     localStorage.setItem('cholo_jai_admin_password', newPassInput.trim());
     setAdminPassword(newPassInput.trim());
-    // Sync password to server
-    fetch('/api/password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ newPassword: newPassInput.trim() })
-    }).catch(() => {});
+    // Sync password to Firestore
+    syncSaveAdminPassword(newPassInput.trim());
 
     setOldPassInput('');
     setNewPassInput('');

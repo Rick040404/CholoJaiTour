@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "BookingLead": {
+      "title": "Booking Lead",
+      "description": "Customer ride bookings, requests, and scheduled trips",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "pickup": { "type": "string" },
+        "destination": { "type": "string" },
+        "date": { "type": "string" },
+        "car": { "type": "string" },
+        "tripType": { "type": "string" },
+        "passengers": { "type": "number" },
+        "isAc": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["new", "confirmed", "completed", "cancelled"] },
+        "advanceAmount": { "type": "number" },
+        "fareEstimate": { "type": "number" },
+        "driverName": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "pickup", "destination", "date", "status"]
+    },
+    "FleetCar": {
+      "title": "Fleet Vehicle",
+      "description": "Commercial vehicles and rental fleet information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "tag": { "type": "string" },
+        "seats": { "type": "string" },
+        "fuel": { "type": "string" },
+        "ac": { "type": "string" },
+        "perKmRate": { "type": "number" },
+        "minFarePerDay": { "type": "number" },
+        "dayRental": { "type": "number" },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "imageUrl": { "type": "string" },
+        "isAvailable": { "type": "boolean" },
+        "bookingCount": { "type": "number" }
+      },
+      "required": ["id", "name", "seats", "perKmRate"]
+    },
+    "InvoiceRecord": {
+      "title": "Invoice Record",
+      "description": "Generated customer invoices and billing memos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "invoiceDate": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerAddress": { "type": "string" },
+        "pickupLocation": { "type": "string" },
+        "dropLocation": { "type": "string" },
+        "carName": { "type": "string" },
+        "carRegistrationNo": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverPhone": { "type": "string" },
+        "tripType": { "type": "string" },
+        "isAc": { "type": "boolean" },
+        "baseFare": { "type": "number" },
+        "tollParkingAmount": { "type": "number" },
+        "driverAllowance": { "type": "number" },
+        "otherCharges": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "advancePaid": { "type": "number" },
+        "paymentMode": { "type": "string" },
+        "paymentStatus": { "type": "string" },
+        "specialNotes": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "invoiceNumber", "customerName", "customerPhone", "baseFare"]
+    }
+  },
+  "firestore": {
+    "/bookings/{bookingId}": {
+      "schema": "BookingLead",
+      "description": "All customer bookings and trip leads synchronized across devices"
+    },
+    "/fleet/{carId}": {
+      "schema": "FleetCar",
+      "description": "Fleet rates and vehicle inventory"
+    },
+    "/invoices/{invoiceId}": {
+      "schema": "InvoiceRecord",
+      "description": "Issued invoices and trip memos"
+    }
+  }
+}

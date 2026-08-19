@@ -63,3 +63,21 @@ export interface FareCalculationInput {
   customKm?: number;
   includeAc: boolean;
 }
+
+export interface BookingLead {
+  id: string;
+  name: string;
+  phone: string;
+  car: string;
+  pickup: string;
+  destination: string;
+  date: string;
+  timeSlot?: string;
+  tripType: string;
+  isAc: boolean;
+  advanceAmount?: string;
+  fareEstimate?: string;
+  status: 'New' | 'Confirmed' | 'Advance Paid' | 'Completed' | 'Cancelled';
+  createdAt: string;
+  notes?: string;
+}

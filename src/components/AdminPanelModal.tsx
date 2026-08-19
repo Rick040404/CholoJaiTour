@@ -4,7 +4,7 @@ import {
   Settings, CheckCircle2, AlertCircle, Clock, Trash2, Edit3, Plus, 
   Sparkles, Megaphone, Save, LogOut, ChevronRight, Eye, EyeOff, RefreshCw,
   MapPin, Check, ChevronDown, User, Tag, Search, Filter, Share2, Copy,
-  ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation
+  ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation, Receipt, FileText
 } from 'lucide-react';
 import { FLEET_CARS, BUSINESS_INFO } from '../data/fleetData';
 import { FleetCar, Language } from '../types';
@@ -16,6 +16,15 @@ import {
   getBengaliDateFromString,
   formatFullBengaliDate
 } from '../utils/bengaliCalendar';
+import { 
+  fetchLiveServerData, 
+  syncSaveBooking, 
+  syncUpdateBooking, 
+  syncDeleteBooking, 
+  syncSaveSchedule, 
+  syncUpdateNotice 
+} from '../utils/syncService';
+import { InvoiceGenerator } from './InvoiceGenerator';
 
 export interface BookingLead {
   id: string;
@@ -95,8 +104,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [confirmPassInput, setConfirmPassInput] = useState('');
   const [changePassStatus, setChangePassStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Active Tab: Overview (4-day dispatch matrix), Future Bookings, Announcements, Settings
-  const [activeTab, setActiveTab] = useState<'overview' | 'future' | 'announcements' | 'settings'>('overview');
+  // Active Tab: Overview (4-day dispatch matrix), Future Bookings, Invoices, Announcements, Settings
+  const [activeTab, setActiveTab] = useState<'overview' | 'future' | 'invoices' | 'announcements' | 'settings'>('overview');
+  const [selectedBookingForInvoice, setSelectedBookingForInvoice] = useState<BookingLead | null>(null);
+
+  const handleOpenInvoiceForBooking = (b: BookingLead) => {
+    setSelectedBookingForInvoice(b);
+    setActiveTab('invoices');
+  };
 
   // Local Fleet State (all 6 cars)
   const [cars, setCars] = useState<FleetCar[]>(() => {
@@ -162,7 +177,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return days;
   }, []);
 
-  // 4-Day Matrix Car Schedules State (persisted in localStorage)
+  // 4-Day Matrix Car Schedules State (persisted in localStorage and cloud synced)
   const [scheduleBookings, setScheduleBookings] = useState<CarDaySchedule[]>(() => {
     const saved = localStorage.getItem('cholo_jai_car_schedules');
     if (saved) {
@@ -174,6 +189,63 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   useEffect(() => {
     localStorage.setItem('cholo_jai_car_schedules', JSON.stringify(scheduleBookings));
   }, [scheduleBookings]);
+
+  // Real-time Cloud Multi-Device Sync
+  const [lastSyncTime, setLastSyncTime] = useState<string>('');
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+
+  const syncDataFromServer = async () => {
+    setIsCloudSyncing(true);
+    try {
+      const serverData = await fetchLiveServerData();
+      if (serverData) {
+        if (Array.isArray(serverData.bookings)) {
+          setBookings(serverData.bookings);
+          localStorage.setItem('cholo_jai_admin_bookings', JSON.stringify(serverData.bookings));
+        }
+        if (Array.isArray(serverData.schedules)) {
+          setScheduleBookings(serverData.schedules);
+          localStorage.setItem('cholo_jai_car_schedules', JSON.stringify(serverData.schedules));
+        }
+        if (serverData.notice) {
+          setNotice(serverData.notice);
+          if (onUpdateNotice) onUpdateNotice(serverData.notice);
+        }
+        if (serverData.adminPassword) {
+          setAdminPassword(serverData.adminPassword);
+        }
+        const now = new Date();
+        setLastSyncTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      }
+    } catch (err) {
+      console.debug('Sync error:', err);
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    // Initial fetch on modal open or mount
+    syncDataFromServer();
+
+    // Live auto-polling every 4 seconds to sync any edits or new bookings made on other devices
+    const interval = setInterval(() => {
+      syncDataFromServer();
+    }, 4000);
+
+    const onFocusOrVisible = () => {
+      syncDataFromServer();
+    };
+
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [isOpen]);
 
   // Schedule Modal State
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
@@ -223,6 +295,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       const filtered = prev.filter(s => !(s.carId === carId && s.dateStr === dateStr));
       return [...filtered, updated];
     });
+    // Cloud sync to other devices
+    syncSaveSchedule(updated);
   };
 
   // Open schedule modal
@@ -255,6 +329,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       const filtered = prev.filter(s => !(s.carId === scheduleFormData.carId && s.dateStr === scheduleFormData.dateStr));
       return [...filtered, scheduleFormData];
     });
+    // Cloud sync to other devices
+    syncSaveSchedule(scheduleFormData);
     setScheduleModalOpen(false);
   };
 
@@ -352,6 +428,13 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
     localStorage.setItem('cholo_jai_admin_password', newPassInput.trim());
     setAdminPassword(newPassInput.trim());
+    // Sync password to server
+    fetch('/api/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPassword: newPassInput.trim() })
+    }).catch(() => {});
+
     setOldPassInput('');
     setNewPassInput('');
     setConfirmPassInput('');
@@ -376,7 +459,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       onUpdateNotice(notice);
     }
     localStorage.setItem('cholo_jai_notice_banner', JSON.stringify(notice));
-    alert(isBn ? 'ঘোষণা সফলভাবে আপডেট হয়েছে!' : 'Announcement banner updated successfully!');
+    syncUpdateNotice(notice);
+    alert(isBn ? 'ঘোষণা সফলভাবে আপডেট হয়েছে এবং সব ডিভাইসে সিঙ্ক করা হয়েছে!' : 'Announcement banner updated and synced across all devices!');
   };
 
   // Add Direct Booking Lead or Future Booking
@@ -404,6 +488,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     };
 
     setBookings([created, ...bookings]);
+    // Cloud sync to other devices
+    syncSaveBooking(created);
 
     setShowAddBooking(false);
     setNewBooking({
@@ -428,12 +514,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     if (!editingBooking) return;
 
     setBookings(bookings.map(b => b.id === editingBooking.id ? editingBooking : b));
+    // Cloud sync to other devices
+    syncUpdateBooking(editingBooking);
     setEditingBooking(null);
   };
 
   const handleDeleteBooking = (id: string) => {
     if (window.confirm(isBn ? 'আপনি কি এই বুকিংটি মুছে ফেলতে চান?' : 'Delete this booking record?')) {
       setBookings(bookings.filter(b => b.id !== id));
+      // Cloud sync to other devices
+      syncDeleteBooking(id);
     }
   };
 
@@ -531,10 +621,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <span className="px-2 py-0.5 rounded-full bg-emerald-400/25 text-emerald-300 text-[10px] sm:text-xs font-extrabold border border-emerald-400/30">
                     {isBn ? 'মালিক পোর্টাল' : 'Live Portal'}
                   </span>
+                  {/* Multi-Device Live Sync Icon Only */}
+                  <button 
+                    onClick={() => syncDataFromServer()}
+                    className="inline-flex items-center justify-center w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-white/20 hover:bg-white/30 text-white transition-all cursor-pointer border border-white/20 active:scale-95"
+                    title={isBn ? 'ক্লাউড সিঙ্ক রিফ্রেশ' : 'Cloud Sync Refresh'}
+                  >
+                    <RefreshCw className={`w-3 h-3 text-cyan-300 ${isCloudSyncing ? 'animate-spin' : ''}`} />
+                  </button>
                 </div>
-                <p className="text-xs text-blue-100 font-medium">
-                  {isBn ? '৬টি গাড়ির ৪ দিনের ডিসপ্যাচ, ভবিষ্যৎ বুকিং ও বাংলা ক্যালেন্ডার' : '6-Car 4-Day Dispatch Matrix, Future Bookings & Bengali Calendar'}
-                </p>
               </div>
             </div>
 
@@ -585,10 +680,6 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             </div>
 
             <div>
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold mb-2 border border-blue-200">
-                <Shield className="w-3.5 h-3.5 text-blue-600" />
-                <span>{isBn ? 'সুরক্ষিত মালিক পোর্টাল' : 'Restricted Access'}</span>
-              </div>
               <h4 className="text-xl font-black text-slate-900">
                 {isBn ? 'অ্যাডমিন সিকিউরিটি অ্যাক্সেস' : 'Admin Security Access'}
               </h4>
@@ -676,6 +767,21 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       {bookings.length}
                     </span>
                   )}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setSelectedBookingForInvoice(null);
+                    setActiveTab('invoices');
+                  }}
+                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                    activeTab === 'invoices'
+                      ? 'bg-white text-emerald-700 border-t-emerald-600 border-x-slate-200 shadow-xs'
+                      : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
+                  }`}
+                >
+                  <Receipt className="w-4 h-4 text-emerald-600" />
+                  <span>{isBn ? 'ইনভয়েস ও বিল জেনারেটর' : 'Invoice Generator'}</span>
                 </button>
 
                 <button
@@ -1151,6 +1257,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 </span>
 
                                 <button
+                                  onClick={() => handleOpenInvoiceForBooking(booking)}
+                                  className="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold flex items-center gap-1 transition-all shadow-2xs"
+                                  title="গ্রাহকের ইনভয়েস বিল তৈরি করুন ও হোয়াটসঅ্যাপে পাঠান"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-emerald-600" />
+                                  <span className="hidden sm:inline">{isBn ? 'ইনভয়েস বিল' : 'Invoice'}</span>
+                                </button>
+
+                                <button
                                   onClick={() => handleCopyBookingDetails(booking)}
                                   className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${
                                     copiedId === booking.id
@@ -1249,6 +1364,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   )}
 
                 </div>
+              )}
+
+              {/* TAB: INVOICE & BILL GENERATOR */}
+              {activeTab === 'invoices' && (
+                <InvoiceGenerator
+                  lang={lang}
+                  prefillBooking={selectedBookingForInvoice}
+                  onBack={() => setActiveTab('future')}
+                />
               )}
 
               {/* TAB 3: PROMO & ANNOUNCEMENT BANNER */}
@@ -2020,12 +2144,25 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               </div>
 
-              <div className="pt-2 flex gap-2">
+              <div className="pt-2 flex flex-wrap gap-2">
                 <button
                   type="submit"
                   className="flex-1 py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs shadow-md"
                 >
                   {isBn ? 'আপডেট সংরক্ষণ করুন' : 'Update Booking'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (editingBooking) {
+                      handleOpenInvoiceForBooking(editingBooking);
+                      setEditingBooking(null);
+                    }
+                  }}
+                  className="py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1 shadow-md"
+                >
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>{isBn ? 'ইনভয়েস বিল' : 'Invoice'}</span>
                 </button>
                 <button
                   type="button"

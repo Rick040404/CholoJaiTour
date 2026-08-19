@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { X, Car, Calendar, MapPin, Phone, MessageSquare, Wind, Check, User, Clock } from 'lucide-react';
 import { FLEET_CARS, BUSINESS_INFO } from '../data/fleetData';
 import { Language } from '../types';
+import { syncSaveBooking } from '../utils/syncService';
+import { BookingLead } from './AdminPanelModal';
 
 interface BookingModalProps {
   isOpen: boolean;
@@ -51,7 +53,7 @@ Booking through Cholo Jai Tour & Travels Official Portal`;
     try {
       const savedBookingsStr = localStorage.getItem('cholo_jai_admin_bookings');
       const currentBookings = savedBookingsStr ? JSON.parse(savedBookingsStr) : [];
-      const newLead = {
+      const newLead: BookingLead = {
         id: `b-${Date.now().toString().slice(-4)}`,
         name: name || 'Valued Customer',
         phone: phone || '9153302517',
@@ -67,6 +69,8 @@ Booking through Cholo Jai Tour & Travels Official Portal`;
         notes: notes || 'Website lead inquiry'
       };
       localStorage.setItem('cholo_jai_admin_bookings', JSON.stringify([newLead, ...currentBookings]));
+      // Multi-device cloud sync
+      syncSaveBooking(newLead);
     } catch (err) {
       console.error('Error saving lead locally:', err);
     }

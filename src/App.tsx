@@ -22,7 +22,7 @@ export default function App() {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [bookingCar, setBookingCar] = useState<string>('');
 
-  // Top Notice Banner state synced with localStorage
+  // Top Notice Banner state synced with localStorage & server
   const [noticeConfig, setNoticeConfig] = useState<NoticeBannerConfig>(() => {
     const saved = localStorage.getItem('cholo_jai_notice_banner');
     if (saved) {
@@ -35,6 +35,19 @@ export default function App() {
       theme: 'amber'
     };
   });
+
+  // Sync notice from server on mount
+  useEffect(() => {
+    fetch('/api/notice')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.notice) {
+          setNoticeConfig(data.notice);
+          localStorage.setItem('cholo_jai_notice_banner', JSON.stringify(data.notice));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleOpenBooking = (carName?: string) => {
     if (carName) {

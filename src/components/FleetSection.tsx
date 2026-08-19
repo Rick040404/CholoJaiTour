@@ -28,10 +28,6 @@ export const FleetSection: React.FC<FleetSectionProps> = ({ lang, onOpenBooking 
         {/* Section Header */}
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8">
           <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-xs font-bold uppercase tracking-wider mb-2">
-              <Car className="w-3.5 h-3.5" />
-              <span>{isBn ? 'আমাদের গাড়ি বহর' : 'Our Vehicle Fleet'}</span>
-            </div>
             <h2 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-slate-900 tracking-tight">
               {isBn ? 'আপনার ভ্রমণের জন্য নিখুঁত গাড়ি নির্বাচন করুন' : 'Select Your Ride from Our Fleet'}
             </h2>
@@ -212,35 +208,6 @@ export const FleetSection: React.FC<FleetSectionProps> = ({ lang, onOpenBooking 
               </div>
             );
           })}
-        </div>
-
-        {/* Bottom Guarantee Banner */}
-        <div className="mt-12 bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center shrink-0">
-              <Shield className="w-6 h-6" />
-            </div>
-            <div>
-              <h4 className="text-base font-bold text-slate-900">
-                {isBn ? 'আমাদের গাড়ি ভাড়ার বিশেষ বৈশিষ্ট্য' : 'Why Choose Cholo Jai Tour & Travels?'}
-              </h4>
-              <p className="text-xs sm:text-sm text-slate-600">
-                {isBn 
-                  ? 'সব গাড়িতে অল ইন্ডিয়া কমার্শিয়াল পারমিট, অভিজ্ঞ ড্রাইভার, সময়ানুবর্তিতা এবং স্বচ্ছ বিলিং।'
-                  : 'All India Commercial Permits, 100% On-Time Chauffeurs, AC Performance guarantee & zero hidden charges.'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3 shrink-0">
-            <a
-              href={`tel:${BUSINESS_INFO.phone1}`}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition-colors"
-            >
-              <Phone className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{isBn ? 'সরাসরি কথা বলুন' : 'Direct Call'}</span>
-            </a>
-          </div>
         </div>
 
       </div>

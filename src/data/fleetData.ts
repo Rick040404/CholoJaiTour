@@ -195,7 +195,7 @@ export const FLEET_CARS: FleetCar[] = [
     acTypeBn: 'চিলড এসি / নন-এসি',
     image: wagonRImg,
     luggage: '2 Medium Bags',
-    fuelType: 'Petrol / CNG High Mileage',
+    fuelType: 'Petrol',
     ratePerKm: 11,
     baseDailyRate: 1800,
     highlightTag: 'Budget Friendly & City Fast',

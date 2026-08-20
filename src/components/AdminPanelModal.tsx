@@ -4,10 +4,11 @@ import {
   Settings, CheckCircle2, AlertCircle, Clock, Trash2, Edit3, Plus, 
   Sparkles, Megaphone, Save, LogOut, ChevronRight, Eye, EyeOff, RefreshCw,
   MapPin, Check, ChevronDown, User, Tag, Search, Filter, Share2, Copy,
-  ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation, Receipt, FileText
+  ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation, Receipt, FileText, Send, Users,
+  Bell, BellRing, CheckCheck
 } from 'lucide-react';
 import { FLEET_CARS, BUSINESS_INFO } from '../data/fleetData';
-import { FleetCar, Language } from '../types';
+import { FleetCar, Language, CRMCustomerProfile, DriverProfile } from '../types';
 import { 
   getBengaliDate, 
   toBengaliNumber, 
@@ -28,9 +29,14 @@ import {
   subscribeToLiveBookings,
   subscribeToLiveSchedules,
   subscribeToLiveNotice,
-  subscribeToLiveFleet
+  subscribeToLiveFleet,
+  subscribeToLiveCustomers,
+  subscribeToLiveDrivers
 } from '../utils/syncService';
 import { InvoiceGenerator } from './InvoiceGenerator';
+import { CRMManager } from './CRMManager';
+import { DriverManagerModal } from './DriverManagerModal';
+import { AssignDriverModal } from './AssignDriverModal';
 
 export interface BookingLead {
   id: string;
@@ -48,6 +54,8 @@ export interface BookingLead {
   status: 'New' | 'Confirmed' | 'Advance Paid' | 'Completed' | 'Cancelled';
   createdAt: string;
   notes?: string;
+  assignedDriver?: string;
+  assignedDriverPhone?: string;
 }
 
 export interface CarDaySchedule {
@@ -111,9 +119,30 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [confirmPassInput, setConfirmPassInput] = useState('');
   const [changePassStatus, setChangePassStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Active Tab: Overview (4-day dispatch matrix), Future Bookings, Invoices, Announcements, Settings
-  const [activeTab, setActiveTab] = useState<'overview' | 'future' | 'invoices' | 'announcements' | 'settings'>('overview');
+  // Active Tab: Overview (4-day dispatch matrix), Future Bookings, CRM, Invoices, Announcements, Settings
+  const [activeTab, setActiveTab] = useState<'overview' | 'future' | 'crm' | 'invoices' | 'announcements' | 'settings'>('overview');
   const [selectedBookingForInvoice, setSelectedBookingForInvoice] = useState<BookingLead | null>(null);
+
+  // CRM Customers State (persisted in Firestore)
+  const [crmCustomers, setCrmCustomers] = useState<CRMCustomerProfile[]>(() => {
+    const saved = localStorage.getItem('cholo_jai_crm_customers');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { return []; }
+    }
+    return [];
+  });
+
+  // Drivers Directory State (persisted in Firestore)
+  const [drivers, setDrivers] = useState<DriverProfile[]>(() => {
+    const saved = localStorage.getItem('cholo_jai_drivers');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { return []; }
+    }
+    return [];
+  });
+
+  const [showDriversModal, setShowDriversModal] = useState<boolean>(false);
+  const [assignDriverBooking, setAssignDriverBooking] = useState<BookingLead | null>(null);
 
   const handleOpenInvoiceForBooking = (b: BookingLead) => {
     setSelectedBookingForInvoice(b);
@@ -214,6 +243,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           setScheduleBookings(serverData.schedules);
           localStorage.setItem('cholo_jai_car_schedules', JSON.stringify(serverData.schedules));
         }
+        if (Array.isArray(serverData.customers)) {
+          setCrmCustomers(serverData.customers);
+          localStorage.setItem('cholo_jai_crm_customers', JSON.stringify(serverData.customers));
+        }
+        if (Array.isArray(serverData.drivers)) {
+          setDrivers(serverData.drivers);
+          localStorage.setItem('cholo_jai_drivers', JSON.stringify(serverData.drivers));
+        }
         if (serverData.notice) {
           setNotice(serverData.notice);
           if (onUpdateNotice) onUpdateNotice(serverData.notice);
@@ -264,6 +301,18 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       }
     });
 
+    const unsubCustomers = subscribeToLiveCustomers((liveCustomers) => {
+      if (liveCustomers && Array.isArray(liveCustomers)) {
+        setCrmCustomers(liveCustomers);
+      }
+    });
+
+    const unsubDrivers = subscribeToLiveDrivers((liveDrivers) => {
+      if (liveDrivers && Array.isArray(liveDrivers)) {
+        setDrivers(liveDrivers);
+      }
+    });
+
     const onFocusOrVisible = () => {
       syncDataFromServer();
     };
@@ -276,6 +325,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       unsubSchedules();
       unsubNotice();
       unsubFleet();
+      unsubCustomers();
+      unsubDrivers();
       window.removeEventListener('focus', onFocusOrVisible);
       document.removeEventListener('visibilitychange', onFocusOrVisible);
     };
@@ -383,6 +434,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [futureStatusFilter, setFutureStatusFilter] = useState('All');
   const [futureDateFilter, setFutureDateFilter] = useState('all-future');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [remindedBookings, setRemindedBookings] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem('cholo_jai_reminded_bookings');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
 
   // Notice State
   const [notice, setNotice] = useState<NoticeBannerConfig>(() => {
@@ -578,17 +637,101 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     setTimeout(() => setCopiedId(null), 2500);
   };
 
+  // Send WhatsApp Trip Reminder to Customer
+  const handleSendTripReminder = (b: BookingLead) => {
+    const bnDate = formatFullBengaliDate(b.date);
+    const cleanPhone = b.phone.replace(/\D/g, '');
+    const bDate = new Date(b.date + 'T00:00:00');
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const diffTime = bDate.getTime() - now.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    let timingWord = 'আসন্ন';
+    if (diffDays === 0) timingWord = 'আজকের';
+    else if (diffDays === 1) timingWord = 'আগামীকালের';
+    else if (diffDays > 1) timingWord = `${toBengaliNumber(diffDays)} দিন পরের`;
+
+    const reminderMsg = `🚕 *CHOLO JAI TOUR & TRAVELS - যাত্রা রিমাইন্ডার* 🚕\n\n` +
+      `নমস্কার *${b.name}* মহাশয়/মহাশয়া,\n` +
+      `চলো যাই ট্যুর এন্ড ট্রাভেলস থেকে আপনার *${timingWord}* যাত্রার বুকিং নিশ্চিতকরণ ও রিমাইন্ডার দেওয়া হচ্ছে:\n\n` +
+      `📅 *যাত্রার তারিখ:* ${b.date} (${bnDate})\n` +
+      `⏰ *নির্ধারিত সময়:* ${b.timeSlot || 'সকাল / প্রাতঃকাল'}\n` +
+      `📍 *পিকআপ লোকেশন:* ${b.pickup}\n` +
+      `🏁 *গন্তব্য স্থান:* ${b.destination}\n` +
+      `🚗 *বরাদ্দ গাড়ি:* ${b.car} (${b.isAc ? 'AC Comfort' : 'Non-AC'})\n` +
+      `💰 *আনুমানিক ভাড়া:* ₹${b.fareEstimate || 'মিটার / নির্ধারিত'}\n` +
+      `💵 *অগ্রিম জমা:* ₹${b.advanceAmount || '0'}\n` +
+      `📌 *বুকিং স্ট্যাটাস:* ${b.status}\n\n` +
+      `✅ আপনার গাড়ি ও চালক সম্পূর্ণ প্রস্তুত রাখা হয়েছে।\n` +
+      `যাত্রার পূর্বে যেকোনো তথ্যের জন্য বা পিকআপ সহায়তা পেতে নির্দ্বিধায় যোগাযোগ করুন:\n` +
+      `📞 *জামালপুর হাব হেল্পলাইন:* 9153302517 / 6296267402\n\n` +
+      `ধন্যবাদ! চলো যাই-এর সাথে আপনার যাত্রা আরামদায়ক ও শুভ হোক। 🙏`;
+
+    const url = `https://wa.me/91${cleanPhone}?text=${encodeURIComponent(reminderMsg)}`;
+    window.open(url, '_blank');
+
+    // Record reminder sent timestamp
+    const nowIso = new Date().toISOString();
+    setRemindedBookings(prev => {
+      const updated = { ...prev, [b.id]: nowIso };
+      localStorage.setItem('cholo_jai_reminded_bookings', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Send WhatsApp Driver Trip Sheet Dispatch
+  const handleSendDriverTripSheet = (b: BookingLead) => {
+    const bnDate = formatFullBengaliDate(b.date);
+    const tripSheetMsg = `🚕 *CHOLO JAI - ড্রাইভার ট্রিপ শিট (DUTY SLIP)* 🚕\n\n` +
+      `👤 *যাত্রীর নাম:* ${b.name}\n` +
+      `📞 *যাত্রীর ফোন:* ${b.phone}\n` +
+      `📅 *তারিখ:* ${b.date} (${bnDate})\n` +
+      `⏰ *পিকআপ সময়:* ${b.timeSlot || 'সময়মত'}\n` +
+      `📍 *পিকআপ:* ${b.pickup}\n` +
+      `🏁 *গন্তব্য:* ${b.destination}\n` +
+      `🚗 *গাড়ি:* ${b.car} (${b.isAc ? 'AC' : 'Non-AC'})\n` +
+      `💰 *ভাড়া:* ₹${b.fareEstimate || 'নির্ধারিত'}\n` +
+      `💵 *অগ্রিম কালেকশন:* ₹${b.advanceAmount || '0'}\n` +
+      (b.notes ? `📝 *বিশেষ নির্দেশ:* ${b.notes}\n` : '') +
+      `\n⚠️ সময়মত পৌঁছে যাত্রীর সাথে ভদ্র ব্যবহার নিশ্চিত করুন।\n` +
+      `📞 কন্ট্রোল রুম: 9153302517`;
+
+    const url = `https://wa.me/?text=${encodeURIComponent(tripSheetMsg)}`;
+    window.open(url, '_blank');
+  };
+
   // Today Date in YYYY-MM-DD
   const todayStr = useMemo(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }, []);
 
+  // Upcoming reminders (Trips today, tomorrow, or in next 2 days)
+  const upcomingReminders = useMemo(() => {
+    return bookings.filter(b => {
+      if (b.status === 'Cancelled' || b.status === 'Completed') return false;
+      const bDate = new Date(b.date + 'T00:00:00');
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      const diffTime = bDate.getTime() - now.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      return diffDays >= 0 && diffDays <= 2;
+    }).sort((a, b) => a.date.localeCompare(b.date));
+  }, [bookings]);
+
   // Filtered Future Bookings
   const filteredFutureBookings = useMemo(() => {
     return bookings.filter(b => {
       // Date filter
-      if (futureDateFilter === 'all-future') {
+      if (futureDateFilter === 'reminders-needed') {
+        const bDate = new Date(b.date + 'T00:00:00');
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+        const diffTime = bDate.getTime() - now.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        if (diffDays < 0 || diffDays > 2) return false;
+      } else if (futureDateFilter === 'all-future') {
         if (b.date < todayStr) return false;
       } else if (futureDateFilter === 'next-7-days') {
         const next7Str = getFutureDateString(7);
@@ -632,29 +775,29 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const currentActiveDay = upcoming4Days[selectedDayOffset] || upcoming4Days[0];
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-6xl w-full overflow-hidden shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-200 my-2 sm:my-4 max-h-[96vh] sm:max-h-[92vh] flex flex-col">
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-0 sm:p-3 md:p-6 overflow-hidden">
+      <div className="bg-white rounded-none sm:rounded-3xl max-w-6xl w-full h-[100dvh] sm:h-auto sm:max-h-[92vh] overflow-hidden shadow-2xl border-0 sm:border border-slate-200 animate-in fade-in zoom-in-95 duration-200 flex flex-col">
         
         {/* Header Strip with vibrant gradient & Live Bengali/English Date */}
-        <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 text-white p-3.5 sm:p-5 shadow-md shrink-0">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 text-white p-3 sm:p-4 md:p-5 shadow-md shrink-0">
+          <div className="flex items-center justify-between gap-2">
             
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-2xl bg-white/15 backdrop-blur-md flex items-center justify-center shadow-inner border border-white/20 shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl sm:rounded-2xl bg-white/15 backdrop-blur-md flex items-center justify-center shadow-inner border border-white/20 shrink-0">
                 <ShieldCheck className="w-5 h-5 sm:w-6 sm:h-6 text-amber-300" />
               </div>
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h3 className="text-base sm:text-xl font-black tracking-tight">
-                    {isBn ? 'চলো যাই • অ্যাডমিন কন্ট্রোল প্যানেল' : 'Cholo Jai • Owner Admin Panel'}
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <h3 className="text-sm sm:text-lg md:text-xl font-black tracking-tight truncate">
+                    {isBn ? 'চলো যাই • অ্যাডমিন প্যানেল' : 'Cholo Jai • Admin Panel'}
                   </h3>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-400/25 text-emerald-300 text-[10px] sm:text-xs font-extrabold border border-emerald-400/30">
-                    {isBn ? 'মালিক পোর্টাল' : 'Live Portal'}
+                  <span className="hidden xs:inline-block px-2 py-0.5 rounded-full bg-emerald-400/25 text-emerald-300 text-[10px] sm:text-xs font-extrabold border border-emerald-400/30">
+                    {isBn ? 'লাইভ' : 'Live'}
                   </span>
                   {/* Multi-Device Live Sync Icon Only */}
                   <button 
                     onClick={() => syncDataFromServer()}
-                    className="inline-flex items-center justify-center w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-white/20 hover:bg-white/30 text-white transition-all cursor-pointer border border-white/20 active:scale-95"
+                    className="inline-flex items-center justify-center w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-white/20 hover:bg-white/30 text-white transition-all cursor-pointer border border-white/20 active:scale-95 shrink-0"
                     title={isBn ? 'ক্লাউড সিঙ্ক রিফ্রেশ' : 'Cloud Sync Refresh'}
                   >
                     <RefreshCw className={`w-3 h-3 text-cyan-300 ${isCloudSyncing ? 'animate-spin' : ''}`} />
@@ -663,35 +806,50 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center justify-between sm:justify-end gap-2 border-t border-white/15 pt-2 sm:pt-0 sm:border-0">
-              
+            <div className="flex items-center gap-2 shrink-0">
               {/* English & Bengali Date Badges in Header */}
-              <div className="flex flex-col items-start sm:items-end text-left sm:text-right">
+              <div className="hidden sm:flex flex-col items-end text-right">
                 <div className="flex items-center gap-1.5 bg-white/15 px-2.5 py-1 rounded-xl border border-white/20 shadow-xs">
                   <Calendar className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                   <span className="text-[11px] sm:text-xs font-bold text-amber-200">
                     {todayBengali.formattedBn}
                   </span>
                 </div>
-                <span className="text-[10px] text-blue-200 font-semibold mt-0.5 hidden sm:inline">
+                <span className="text-[10px] text-blue-200 font-semibold mt-0.5">
                   {todayBengali.formattedEn}
                 </span>
               </div>
 
-              <div className="flex items-center gap-1.5 ml-2">
+              <div className="flex items-center gap-1.5">
+                {isAuthenticated && (
+                  <button
+                    onClick={() => setShowDriversModal(true)}
+                    className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black transition-all shadow-sm border border-amber-300/80 active:scale-95 cursor-pointer"
+                    title={isBn ? 'ড্রাইভার ডিরেক্টরি ও নতুন ড্রাইভার যোগ' : 'Drivers Directory & Add New Driver'}
+                  >
+                    <Car className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+                    <span>{isBn ? 'ড্রাইভার' : 'Drivers'}</span>
+                    {drivers.length > 0 && (
+                      <span className="px-1.5 py-0.2 rounded-full bg-slate-950 text-amber-300 text-[10px] font-black">
+                        {drivers.length}
+                      </span>
+                    )}
+                  </button>
+                )}
+
                 {isAuthenticated && (
                   <button
                     onClick={handleLogout}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-bold transition-colors border border-white/20"
+                    className="flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-bold transition-colors border border-white/20 cursor-pointer"
                     title="Logout"
                   >
                     <LogOut className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">{isBn ? 'লগআউট' : 'Logout'}</span>
+                    <span className="hidden md:inline">{isBn ? 'লগআউট' : 'Logout'}</span>
                   </button>
                 )}
                 <button
                   onClick={onClose}
-                  className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition-colors border border-white/20 active:scale-95"
+                  className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition-colors border border-white/20 active:scale-95 cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -768,33 +926,50 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           <div className="flex-1 flex flex-col overflow-hidden">
             
             {/* Top Navigation Tabs */}
-            <div className="bg-slate-100/90 border-b border-slate-200 px-3 sm:px-6 pt-2 shrink-0 overflow-x-auto">
-              <div className="flex space-x-2">
+            <div className="bg-slate-100/95 border-b border-slate-200 px-2 sm:px-4 md:px-6 pt-1.5 sm:pt-2 shrink-0 overflow-x-auto no-scrollbar">
+              <div className="flex space-x-1.5 sm:space-x-2 min-w-max">
                 <button
                   onClick={() => setActiveTab('overview')}
-                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
                     activeTab === 'overview'
                       ? 'bg-white text-blue-700 border-t-blue-600 border-x-slate-200 shadow-xs'
                       : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
-                  <CalendarDays className="w-4 h-4 text-blue-600" />
-                  <span>{isBn ? '৪ দিনের ডিসপ্যাচ ও শিডিউল' : '4-Day Dispatch Matrix'}</span>
+                  <CalendarDays className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>{isBn ? '৪ দিনের শিডিউল' : '4-Day Matrix'}</span>
                 </button>
 
                 <button
                   onClick={() => setActiveTab('future')}
-                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
                     activeTab === 'future'
                       ? 'bg-white text-purple-700 border-t-purple-600 border-x-slate-200 shadow-xs'
                       : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
-                  <Clock className="w-4 h-4 text-purple-600" />
-                  <span>{isBn ? 'ভবিষ্যৎ ও অগ্রিম বুকিং' : 'Future Bookings'}</span>
+                  <Clock className="w-4 h-4 text-purple-600 shrink-0" />
+                  <span>{isBn ? 'ভবিষ্যৎ বুকিং' : 'Future Bookings'}</span>
                   {bookings.length > 0 && (
-                    <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-purple-100 text-purple-700 font-black">
+                    <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-purple-100 text-purple-700 font-black">
                       {bookings.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('crm')}
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
+                    activeTab === 'crm'
+                      ? 'bg-white text-blue-700 border-t-blue-600 border-x-slate-200 shadow-xs'
+                      : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
+                  }`}
+                >
+                  <Users className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>{isBn ? 'কাস্টমার CRM' : 'Customer CRM'}</span>
+                  {crmCustomers.length > 0 && (
+                    <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-blue-100 text-blue-700 font-black">
+                      {crmCustomers.length}
                     </span>
                   )}
                 </button>
@@ -804,38 +979,38 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     setSelectedBookingForInvoice(null);
                     setActiveTab('invoices');
                   }}
-                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
                     activeTab === 'invoices'
                       ? 'bg-white text-emerald-700 border-t-emerald-600 border-x-slate-200 shadow-xs'
                       : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
-                  <Receipt className="w-4 h-4 text-emerald-600" />
-                  <span>{isBn ? 'ইনভয়েস ও বিল জেনারেটর' : 'Invoice Generator'}</span>
+                  <Receipt className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{isBn ? 'ইনভয়েস বিল' : 'Invoice Bill'}</span>
                 </button>
 
                 <button
                   onClick={() => setActiveTab('announcements')}
-                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
                     activeTab === 'announcements'
                       ? 'bg-white text-amber-700 border-t-amber-500 border-x-slate-200 shadow-xs'
                       : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
-                  <Megaphone className="w-4 h-4 text-amber-500" />
-                  <span>{isBn ? 'ঘোষণা ব্যানার' : 'Announcements'}</span>
+                  <Megaphone className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span>{isBn ? 'নোটিশ ব্যানার' : 'Announcements'}</span>
                 </button>
 
                 <button
                   onClick={() => setActiveTab('settings')}
-                  className={`flex items-center gap-2 py-2.5 px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 py-2 sm:py-2.5 px-3 sm:px-3.5 rounded-t-xl text-xs sm:text-sm font-black border-t-2 border-x transition-all whitespace-nowrap cursor-pointer ${
                     activeTab === 'settings'
                       ? 'bg-white text-slate-800 border-t-slate-700 border-x-slate-200 shadow-xs'
                       : 'bg-transparent text-slate-600 border-transparent hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
-                  <Settings className="w-4 h-4 text-slate-700" />
-                  <span>{isBn ? 'এজেন্সি ও পাসওয়ার্ড' : 'Settings & Password'}</span>
+                  <Settings className="w-4 h-4 text-slate-700 shrink-0" />
+                  <span>{isBn ? 'সেটিংস' : 'Settings'}</span>
                 </button>
               </div>
             </div>
@@ -1122,6 +1297,107 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               {activeTab === 'future' && (
                 <div className="space-y-6">
                   
+                  {/* FUTURE BOOKINGS REMINDERS HUB BANNER */}
+                  {upcomingReminders.length > 0 ? (
+                    <div className="bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-amber-500/20 border border-amber-400/40">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 animate-bounce">
+                            <BellRing className="w-6 h-6 text-white" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="text-base sm:text-lg font-black tracking-tight">
+                                {isBn ? '🔔 আসন্ন ট্রিপ রিমাইন্ডার সতর্কতা' : '🔔 Upcoming Trip Reminders'}
+                              </h4>
+                              <span className="bg-white text-amber-950 px-2.5 py-0.5 rounded-full text-xs font-black shadow-2xs">
+                                {isBn ? `${toBengaliNumber(upcomingReminders.length)} টি আসন্ন বুকিং` : `${upcomingReminders.length} Trips Soon`}
+                              </span>
+                            </div>
+                            <p className="text-xs text-white/90 font-medium mt-0.5">
+                              {isBn 
+                                ? 'আজ ও আগামী ২ দিনের ট্রিপের জন্য গ্রাহক ও ড্রাইভারকে হোয়াটসঅ্যাপে সময়মত রিমাইন্ডার পাঠান।' 
+                                : 'Send WhatsApp journey reminders to customers and drivers for trips in the next 48 hours.'}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 self-start sm:self-auto">
+                          <button
+                            onClick={() => setFutureDateFilter('reminders-needed')}
+                            className="px-3.5 py-2 rounded-xl bg-white text-amber-900 hover:bg-amber-50 font-black text-xs shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Filter className="w-3.5 h-3.5" />
+                            <span>{isBn ? 'রিমাইন্ডার তালিকা দেখুন' : 'View Reminders'}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Quick Reminder Dispatch Carousel/List */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5 mt-3.5 pt-3.5 border-t border-white/20">
+                        {upcomingReminders.slice(0, 3).map((remBooking) => {
+                          const bDate = new Date(remBooking.date + 'T00:00:00');
+                          const now = new Date();
+                          now.setHours(0,0,0,0);
+                          const dDiff = Math.ceil((bDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                          const isSent = Boolean(remindedBookings[remBooking.id]);
+
+                          return (
+                            <div 
+                              key={`rem-${remBooking.id}`}
+                              className="bg-black/15 backdrop-blur-xs rounded-xl p-2.5 border border-white/20 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-extrabold text-xs text-white truncate">
+                                    {remBooking.name}
+                                  </span>
+                                  <span className={`text-[10px] font-black px-1.5 py-0.2 rounded-md ${
+                                    dDiff === 0 ? 'bg-red-500 text-white' : dDiff === 1 ? 'bg-amber-300 text-amber-950' : 'bg-white/30 text-white'
+                                  }`}>
+                                    {dDiff === 0 ? (isBn ? 'আজ' : 'Today') : dDiff === 1 ? (isBn ? 'কাল' : 'Tmrw') : `${dDiff}d`}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-white/80 truncate">
+                                  {remBooking.destination} • {remBooking.car}
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={() => handleSendTripReminder(remBooking)}
+                                className={`px-2.5 py-1.5 rounded-lg text-xs font-black flex items-center gap-1 shrink-0 transition-all cursor-pointer ${
+                                  isSent 
+                                    ? 'bg-emerald-600 text-white hover:bg-emerald-700' 
+                                    : 'bg-white text-slate-900 hover:bg-white/90 shadow-xs'
+                                }`}
+                                title={isBn ? 'গ্রাহককে হোয়াটসঅ্যাপ রিমাইন্ডার পাঠান' : 'Send WhatsApp Reminder'}
+                              >
+                                {isSent ? <CheckCheck className="w-3.5 h-3.5 text-emerald-200" /> : <Bell className="w-3.5 h-3.5 text-amber-600" />}
+                                <span>{isSent ? (isBn ? 'প্রেরিত' : 'Sent') : (isBn ? 'রিমাইন্ড' : 'Remind')}</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-emerald-50 border border-emerald-200/80 rounded-2xl p-4 flex items-center justify-between gap-3 text-emerald-900">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                          <CheckCircle2 className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h5 className="text-xs sm:text-sm font-black">
+                            {isBn ? '✅ সব ভবিষ্যৎ ট্রিপ শিডিউল আপ-টু-ডেট' : '✅ All Upcoming Bookings Are Up-to-Date'}
+                          </h5>
+                          <p className="text-[11px] text-emerald-700">
+                            {isBn ? 'পরবর্তী ৪৮ ঘণ্টার জন্য কোনো অমীমাংসিত জরুরি রিমাইন্ডার বাকি নেই।' : 'No urgent reminders pending for the next 48 hours.'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Top Action Bar with Search, Filters & Add Booking Button */}
                   <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
@@ -1137,7 +1413,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                       <button
                         onClick={() => setShowAddBooking(true)}
-                        className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-purple-500/20 active:scale-95 transition-all self-start md:self-auto"
+                        className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-purple-500/20 active:scale-95 transition-all self-start md:self-auto cursor-pointer"
                       >
                         <Plus className="w-4 h-4" />
                         <span>{isBn ? 'নতুন ভবিষ্যৎ বুকিং যোগ করুন' : 'Add Advance Booking'}</span>
@@ -1164,6 +1440,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         onChange={(e) => setFutureDateFilter(e.target.value)}
                         className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 bg-slate-50 focus:border-purple-600 outline-none"
                       >
+                        <option value="reminders-needed">{isBn ? '🔔 রিমাইন্ডার প্রয়োজন (আজ ও আগামীকালের ট্রিপ)' : '🔔 Reminders Needed (Today & Soon)'}</option>
                         <option value="all-future">{isBn ? '📅 সব ভবিষ্যৎ বুকিং (All Future)' : '📅 All Future Dates'}</option>
                         <option value="next-7-days">{isBn ? '📅 পরবর্তী ৭ দিন (Next 7 Days)' : '📅 Next 7 Days'}</option>
                         <option value="this-month">{isBn ? '📅 চলতি মাস (This Month)' : '📅 This Month'}</option>
@@ -1232,16 +1509,26 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         else if (diffDays > 1) relativeDayLabel = isBn ? `${toBengaliNumber(diffDays)} দিন বাকি` : `${diffDays} days away`;
                         else relativeDayLabel = isBn ? 'অতীত ট্রিপ' : 'Past Trip';
 
+                        const isReminderSent = Boolean(remindedBookings[booking.id]);
+
                         return (
                           <div 
                             key={booking.id}
-                            className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs hover:shadow-md transition-all space-y-3"
+                            className={`bg-white rounded-2xl border p-4 sm:p-5 shadow-xs hover:shadow-md transition-all space-y-3 ${
+                              diffDays === 0 ? 'border-red-300 ring-2 ring-red-100' :
+                              diffDays === 1 ? 'border-amber-300 ring-2 ring-amber-50' :
+                              'border-slate-200'
+                            }`}
                           >
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
                               
                               {/* Left: Date with Dual Calendar (English & Bengali) */}
                               <div className="flex items-start gap-3">
-                                <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-700 to-indigo-600 text-white flex flex-col items-center justify-center shrink-0 shadow-sm">
+                                <div className={`w-12 h-12 rounded-2xl text-white flex flex-col items-center justify-center shrink-0 shadow-sm ${
+                                  diffDays === 0 ? 'bg-gradient-to-tr from-red-600 to-rose-700' :
+                                  diffDays === 1 ? 'bg-gradient-to-tr from-amber-600 to-orange-600' :
+                                  'bg-gradient-to-tr from-purple-700 to-indigo-600'
+                                }`}>
                                   <span className="text-[10px] font-extrabold uppercase leading-none">
                                     {new Date(booking.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
                                   </span>
@@ -1255,13 +1542,29 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                     <span className="text-sm font-black text-slate-900">
                                       {new Date(booking.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
                                     </span>
+
+                                    {/* TIME DISPLAY AFTER DATE */}
+                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-indigo-50 text-indigo-900 text-xs font-black border border-indigo-200 shadow-2xs">
+                                      <Clock className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                                      <span>{booking.timeSlot || (isBn ? 'সকাল' : 'Morning')}</span>
+                                    </span>
+
                                     <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
-                                      diffDays <= 1 
-                                        ? 'bg-amber-100 text-amber-800 border border-amber-300' 
+                                      diffDays === 0 
+                                        ? 'bg-red-100 text-red-800 border border-red-300 animate-pulse' 
+                                        : diffDays === 1
+                                        ? 'bg-amber-100 text-amber-800 border border-amber-300'
                                         : 'bg-purple-100 text-purple-800 border border-purple-200'
                                     }`}>
                                       {relativeDayLabel}
                                     </span>
+
+                                    {isReminderSent && (
+                                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                                        <CheckCheck className="w-3 h-3 text-emerald-600" />
+                                        <span>{isBn ? 'রিমাইন্ডার প্রেরিত' : 'Reminded'}</span>
+                                      </span>
+                                    )}
                                   </div>
 
                                   {/* Bengali Date Display Badge */}
@@ -1275,7 +1578,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               </div>
 
                               {/* Right: Booking Status & Quick Actions */}
-                              <div className="flex items-center gap-2 self-start sm:self-auto">
+                              <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
                                 <span className={`px-2.5 py-1 rounded-full text-xs font-extrabold border ${
                                   booking.status === 'Confirmed' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
                                   booking.status === 'Advance Paid' ? 'bg-blue-100 text-blue-800 border-blue-300' :
@@ -1286,18 +1589,44 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   ● {booking.status}
                                 </span>
 
+                                {/* Assign Driver Button */}
+                                <button
+                                  onClick={() => setAssignDriverBooking(booking)}
+                                  className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-black flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+                                  title={isBn ? 'ড্রাইভার বরাদ্দ করুন ও হোয়াটসঅ্যাপে ট্রিপ ডিটেইলস পাঠান' : 'Assign Driver and send customer name, location, mobile & car to WhatsApp'}
+                                >
+                                  <Car className="w-3.5 h-3.5 text-blue-100" />
+                                  <span>{isBn ? 'ড্রাইভার বরাদ্দ' : 'Assign Driver'}</span>
+                                </button>
+
+                                {/* WhatsApp Reminder Dispatch Button */}
+                                <button
+                                  onClick={() => handleSendTripReminder(booking)}
+                                  className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-2xs cursor-pointer ${
+                                    isReminderSent
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                      : diffDays <= 1
+                                      ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse'
+                                      : 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-300'
+                                  }`}
+                                  title={isBn ? 'গ্রাহককে হোয়াটসঅ্যাপ যাত্রা রিমাইন্ডার পাঠান' : 'Send WhatsApp Reminder to Customer'}
+                                >
+                                  <Bell className="w-3.5 h-3.5" />
+                                  <span className="hidden sm:inline">{isBn ? 'রিমাইন্ডার' : 'Reminder'}</span>
+                                </button>
+
                                 <button
                                   onClick={() => handleOpenInvoiceForBooking(booking)}
-                                  className="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold flex items-center gap-1 transition-all shadow-2xs"
+                                  className="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold flex items-center gap-1 transition-all shadow-2xs cursor-pointer"
                                   title="গ্রাহকের ইনভয়েস বিল তৈরি করুন ও হোয়াটসঅ্যাপে পাঠান"
                                 >
                                   <FileText className="w-3.5 h-3.5 text-emerald-600" />
-                                  <span className="hidden sm:inline">{isBn ? 'ইনভয়েস বিল' : 'Invoice'}</span>
+                                  <span className="hidden sm:inline">{isBn ? 'ইনভয়েস' : 'Invoice'}</span>
                                 </button>
 
                                 <button
                                   onClick={() => handleCopyBookingDetails(booking)}
-                                  className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${
+                                  className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
                                     copiedId === booking.id
                                       ? 'bg-emerald-600 text-white border-emerald-600'
                                       : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
@@ -1305,12 +1634,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   title="WhatsApp Trip Sheet কপি করুন"
                                 >
                                   {copiedId === booking.id ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                                  <span className="hidden sm:inline">{copiedId === booking.id ? 'কপি হয়েছে' : 'Trip Sheet'}</span>
                                 </button>
 
                                 <button
                                   onClick={() => setEditingBooking(booking)}
-                                  className="p-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors"
+                                  className="p-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors cursor-pointer"
                                   title="Edit Booking"
                                 >
                                   <Edit3 className="w-3.5 h-3.5" />
@@ -1318,13 +1646,51 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                                 <button
                                   onClick={() => handleDeleteBooking(booking.id)}
-                                  className="p-2 rounded-xl bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 border border-slate-200 transition-colors"
+                                  className="p-2 rounded-xl bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 border border-slate-200 transition-colors cursor-pointer"
                                   title="Delete Booking"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               </div>
                             </div>
+
+                            {/* Assigned Driver Status Banner if present */}
+                            {booking.assignedDriver && (
+                              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 text-xs text-blue-950 font-bold">
+                                <div className="flex items-center gap-2 truncate">
+                                  <div className="w-6 h-6 rounded-lg bg-blue-600 text-white flex items-center justify-center text-[11px] font-black shrink-0">
+                                    <Car className="w-3.5 h-3.5" />
+                                  </div>
+                                  <div className="truncate">
+                                    <span className="text-slate-500 font-medium text-[10px] uppercase block leading-none">{isBn ? 'বরাদ্দ ড্রাইভার' : 'Assigned Driver'}</span>
+                                    <span className="font-black text-blue-950">{booking.assignedDriver}</span>
+                                    {booking.assignedDriverPhone && (
+                                      <span className="ml-1 text-slate-600 font-bold">({booking.assignedDriverPhone})</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {booking.assignedDriverPhone && (
+                                    <a
+                                      href={`https://wa.me/91${booking.assignedDriverPhone.replace(/\D/g, '')}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold flex items-center gap-1 shadow-2xs"
+                                      title="WhatsApp Driver"
+                                    >
+                                      <MessageSquare className="w-3 h-3 fill-current" />
+                                      <span>WhatsApp</span>
+                                    </a>
+                                  )}
+                                  <button
+                                    onClick={() => setAssignDriverBooking(booking)}
+                                    className="px-2 py-1 rounded-lg bg-white hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-bold cursor-pointer"
+                                  >
+                                    {isBn ? 'পরিবর্তন' : 'Reassign'}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
 
                             {/* Middle Grid: Customer, Route, Vehicle & Fare */}
                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
@@ -1394,6 +1760,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   )}
 
                 </div>
+              )}
+
+              {/* TAB: CRM DATA MANAGEMENT & INTEGRATED BROADCAST SENDER */}
+              {activeTab === 'crm' && (
+                <CRMManager
+                  customers={crmCustomers}
+                  bookings={bookings}
+                  lang={lang}
+                  onRefresh={syncDataFromServer}
+                />
               )}
 
               {/* TAB: INVOICE & BILL GENERATOR */}
@@ -1908,7 +2284,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <input
                     type="text"
                     required
-                    value={newBooking.name}
+                    value={newBooking.name || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, name: e.target.value })}
                     placeholder="Customer Name"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
@@ -1920,7 +2296,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <input
                     type="tel"
                     required
-                    value={newBooking.phone}
+                    value={newBooking.phone || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, phone: e.target.value })}
                     placeholder="10-digit mobile"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
@@ -1928,33 +2304,60 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               </div>
 
-              {/* Date Selection with Bengali Calendar Live Preview */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  {isBn ? 'যাত্রার তারিখ (Date of Journey) *' : 'Journey Date *'}
-                </label>
-                <input
-                  type="date"
-                  required
-                  value={newBooking.date}
-                  onChange={(e) => setNewBooking({ ...newBooking, date: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold focus:border-purple-600 outline-none"
-                />
-                {newBooking.date && (
-                  <div className="mt-1.5 p-2 rounded-xl bg-purple-50 border border-purple-200/80 flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                    <span className="text-[11px] text-purple-950 font-black">
-                      বাংলা ক্যালেন্ডার: {formatFullBengaliDate(newBooking.date)}
-                    </span>
+              {/* Date & Time Selection with Bengali Calendar Live Preview */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    {isBn ? 'যাত্রার তারিখ (Date of Journey) *' : 'Journey Date *'}
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={newBooking.date || ''}
+                    onChange={(e) => setNewBooking({ ...newBooking, date: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold focus:border-purple-600 outline-none"
+                  />
+                  {newBooking.date && (
+                    <div className="mt-1.5 p-1.5 rounded-xl bg-purple-50 border border-purple-200/80 flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-purple-600 shrink-0" />
+                      <span className="text-[10px] text-purple-950 font-black truncate">
+                        বাংলা: {formatFullBengaliDate(newBooking.date)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    {isBn ? 'যাত্রার সময় (Departure Time) *' : 'Journey Time *'}
+                  </label>
+                  <input
+                    type="text"
+                    value={newBooking.timeSlot || ''}
+                    onChange={(e) => setNewBooking({ ...newBooking, timeSlot: e.target.value })}
+                    placeholder="e.g. 06:00 AM / 02:30 PM"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold focus:border-purple-600 outline-none"
+                  />
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {['06:00 AM', '08:30 AM', '02:00 PM', '07:00 PM', 'Full Day'].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setNewBooking({ ...newBooking, timeSlot: t })}
+                        className="px-1.5 py-0.5 rounded-md bg-slate-100 hover:bg-purple-100 hover:text-purple-800 text-[10px] font-bold text-slate-600 transition-colors cursor-pointer"
+                      >
+                        {t}
+                      </button>
+                    ))}
                   </div>
-                )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'গাড়ির মডেল:' : 'Vehicle:'}</label>
                   <select
-                    value={newBooking.car}
+                    value={newBooking.car || 'Maruti Suzuki Ertiga (7 Seater)'}
                     onChange={(e) => setNewBooking({ ...newBooking, car: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
                   >
@@ -1970,7 +2373,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'ট্রিপের ধরন:' : 'Trip Type:'}</label>
                   <select
-                    value={newBooking.tripType}
+                    value={newBooking.tripType || 'Outstation Tour'}
                     onChange={(e) => setNewBooking({ ...newBooking, tripType: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
                   >
@@ -1988,7 +2391,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'পিকআপ স্থান:' : 'Pickup Location:'}</label>
                   <input
                     type="text"
-                    value={newBooking.pickup}
+                    value={newBooking.pickup || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, pickup: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
                   />
@@ -1998,7 +2401,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'গন্তব্য:' : 'Destination:'}</label>
                   <input
                     type="text"
-                    value={newBooking.destination}
+                    value={newBooking.destination || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, destination: e.target.value })}
                     placeholder="e.g. Digha / Tarapith / Puri"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
@@ -2011,7 +2414,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'মোট আনুমানিক ভাড়া (₹):' : 'Estimated Fare (₹):'}</label>
                   <input
                     type="text"
-                    value={newBooking.fareEstimate}
+                    value={newBooking.fareEstimate || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, fareEstimate: e.target.value })}
                     placeholder="e.g. 5000"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
@@ -2022,7 +2425,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'অগ্রিম জমা (₹):' : 'Advance Received (₹):'}</label>
                   <input
                     type="text"
-                    value={newBooking.advanceAmount}
+                    value={newBooking.advanceAmount || ''}
                     onChange={(e) => setNewBooking({ ...newBooking, advanceAmount: e.target.value })}
                     placeholder="e.g. 1000"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-purple-600 outline-none"
@@ -2076,7 +2479,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <input
                     type="text"
                     required
-                    value={editingBooking.name}
+                    value={editingBooking.name || ''}
                     onChange={(e) => setEditingBooking({ ...editingBooking, name: e.target.value })}
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
                   />
@@ -2087,7 +2490,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   <input
                     type="tel"
                     required
-                    value={editingBooking.phone}
+                    value={editingBooking.phone || ''}
                     onChange={(e) => setEditingBooking({ ...editingBooking, phone: e.target.value })}
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
                   />
@@ -2096,9 +2499,53 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'বুকিং স্ট্যাটাস:' : 'Status:'}</label>
+                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'তারিখ (Date):' : 'Date:'}</label>
+                  <input
+                    type="date"
+                    required
+                    value={editingBooking.date || ''}
+                    onChange={(e) => setEditingBooking({ ...editingBooking, date: e.target.value })}
+                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-bold"
+                  />
+                  {editingBooking.date && (
+                    <div className="mt-1.5 p-1.5 rounded-xl bg-blue-50 border border-blue-200/80 flex items-center gap-1.5">
+                      <Calendar className="w-3 h-3 text-blue-600 shrink-0" />
+                      <span className="text-[10px] text-blue-950 font-bold truncate">
+                        বাংলা: {formatFullBengaliDate(editingBooking.date)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'যাত্রার সময় (Time):' : 'Journey Time:'}</label>
+                  <input
+                    type="text"
+                    value={editingBooking.timeSlot || ''}
+                    onChange={(e) => setEditingBooking({ ...editingBooking, timeSlot: e.target.value })}
+                    placeholder="e.g. 06:00 AM / 02:30 PM"
+                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold"
+                  />
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {['06:00 AM', '08:30 AM', '02:00 PM', '07:00 PM', 'Full Day'].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setEditingBooking({ ...editingBooking, timeSlot: t })}
+                        className="px-1.5 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 hover:text-blue-800 text-[10px] font-bold text-slate-600 cursor-pointer"
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'বুকিং স্ট্যাটাস:' : 'Booking Status:'}</label>
                   <select
-                    value={editingBooking.status}
+                    value={editingBooking.status || 'Confirmed'}
                     onChange={(e) => setEditingBooking({ ...editingBooking, status: e.target.value as any })}
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-bold"
                   >
@@ -2111,48 +2558,27 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'তারিখ:' : 'Date:'}</label>
-                  <input
-                    type="date"
-                    required
-                    value={editingBooking.date}
-                    onChange={(e) => setEditingBooking({ ...editingBooking, date: e.target.value })}
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
-                  />
-                  {editingBooking.date && (
-                    <div className="mt-1.5 p-1.5 rounded-xl bg-blue-50 border border-blue-200/80 flex items-center gap-1.5">
-                      <Calendar className="w-3 h-3 text-blue-600 shrink-0" />
-                      <span className="text-[10px] text-blue-950 font-bold">
-                        বাংলা ক্যালেন্ডার: {formatFullBengaliDate(editingBooking.date)}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'গাড়ির মডেল:' : 'Vehicle:'}</label>
                   <input
                     type="text"
-                    value={editingBooking.car}
+                    value={editingBooking.car || ''}
                     onChange={(e) => setEditingBooking({ ...editingBooking, car: e.target.value })}
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
                   />
                 </div>
+              </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'গন্তব্য:' : 'Destination:'}</label>
                   <input
                     type="text"
-                    value={editingBooking.destination}
+                    value={editingBooking.destination || ''}
                     onChange={(e) => setEditingBooking({ ...editingBooking, destination: e.target.value })}
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
                   />
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">{isBn ? 'আনুমানিক ভাড়া (₹):' : 'Estimated Fare (₹):'}</label>
                   <input
@@ -2162,16 +2588,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
                   />
                 </div>
+              </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'অগ্রিম জমা (₹):' : 'Advance Received (₹):'}</label>
-                  <input
-                    type="text"
-                    value={editingBooking.advanceAmount || ''}
-                    onChange={(e) => setEditingBooking({ ...editingBooking, advanceAmount: e.target.value })}
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
-                  />
-                </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">{isBn ? 'অগ্রিম জমা (₹):' : 'Advance Received (₹):'}</label>
+                <input
+                  type="text"
+                  value={editingBooking.advanceAmount || ''}
+                  onChange={(e) => setEditingBooking({ ...editingBooking, advanceAmount: e.target.value })}
+                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs"
+                />
               </div>
 
               <div className="pt-2 flex flex-wrap gap-2">
@@ -2207,6 +2633,36 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           </div>
         </div>
       )}
+
+      {/* DRIVERS DIRECTORY MODAL */}
+      <DriverManagerModal
+        isOpen={showDriversModal}
+        onClose={() => setShowDriversModal(false)}
+        drivers={drivers}
+        onDriversUpdate={(updated) => {
+          setDrivers(updated);
+          localStorage.setItem('cholo_jai_drivers', JSON.stringify(updated));
+        }}
+        lang={lang}
+      />
+
+      {/* ASSIGN DRIVER & WHATSAPP DISPATCH MODAL */}
+      <AssignDriverModal
+        isOpen={Boolean(assignDriverBooking)}
+        onClose={() => setAssignDriverBooking(null)}
+        booking={assignDriverBooking}
+        drivers={drivers}
+        onAssignSuccess={(updatedBooking) => {
+          setBookings(bookings.map(b => b.id === updatedBooking.id ? updatedBooking : b));
+          setAssignDriverBooking(null);
+        }}
+        onAddDriver={(newDriver) => {
+          const updated = [newDriver, ...drivers.filter(d => d.id !== newDriver.id)];
+          setDrivers(updated);
+          localStorage.setItem('cholo_jai_drivers', JSON.stringify(updated));
+        }}
+        lang={lang}
+      />
 
     </div>
   );

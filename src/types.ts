@@ -80,4 +80,83 @@ export interface BookingLead {
   status: 'New' | 'Confirmed' | 'Advance Paid' | 'Completed' | 'Cancelled';
   createdAt: string;
   notes?: string;
+  assignedDriver?: string;
+  assignedDriverPhone?: string;
+}
+
+export interface DriverProfile {
+  id: string;
+  name: string;
+  phone: string;
+  alternatePhone?: string;
+  vehicleAssigned?: string;
+  licenseNo?: string;
+  status: 'Available' | 'On Trip' | 'Leave';
+  address?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OccasionPreset {
+  id: string;
+  title: string;
+  titleBn: string;
+  subtitle: string;
+  subtitleBn: string;
+  iconName: string;
+  themeColor: string;
+  badgeText: string;
+  badgeTextBn: string;
+  imageUrl: string;
+  messageEn: string;
+  messageBn: string;
+  couponCode?: string;
+}
+
+export interface OccasionBroadcastState {
+  occasionId: string;
+  title: string;
+  titleBn: string;
+  subtitle: string;
+  subtitleBn: string;
+  imageUrl: string;
+  messageEn: string;
+  messageBn: string;
+  couponCode: string;
+  isLiveOnWebsite: boolean;
+  updatedAt: string;
+}
+
+export interface CustomerVisitRecord {
+  tripId: string;
+  date: string;
+  pickup: string;
+  destination: string;
+  car: string;
+  tripType: string;
+  fare?: number;
+  advanceAmount?: number;
+  status: 'Completed' | 'Confirmed' | 'Advance Paid' | 'Cancelled' | 'In Progress';
+  notes?: string;
+}
+
+export interface CRMCustomerProfile {
+  id: string;
+  name: string;
+  phone: string;
+  alternatePhone?: string;
+  address?: string;
+  email?: string;
+  category: 'Regular' | 'VIP' | 'Corporate' | 'Tour' | 'Wedding';
+  totalTrips: number;
+  totalSpent: number;
+  lastTripDate: string;
+  lastDestination?: string;
+  preferredCar?: string;
+  notes?: string;
+  tags?: string[];
+  visitHistory: CustomerVisitRecord[];
+  createdAt: string;
+  updatedAt: string;
 }

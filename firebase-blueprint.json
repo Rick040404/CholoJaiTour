@@ -77,6 +77,45 @@
         "createdAt": { "type": "string" }
       },
       "required": ["id", "invoiceNumber", "customerName", "customerPhone", "baseFare"]
+    },
+    "CustomerProfile": {
+      "title": "Customer Profile",
+      "description": "CRM customer records with contact info and visit trip history",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "alternatePhone": { "type": "string" },
+        "address": { "type": "string" },
+        "email": { "type": "string" },
+        "category": { "type": "string", "enum": ["Regular", "VIP", "Corporate", "Tour", "Wedding"] },
+        "totalTrips": { "type": "number" },
+        "totalSpent": { "type": "number" },
+        "lastTripDate": { "type": "string" },
+        "lastDestination": { "type": "string" },
+        "notes": { "type": "string" },
+        "visitHistory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tripId": { "type": "string" },
+              "date": { "type": "string" },
+              "pickup": { "type": "string" },
+              "destination": { "type": "string" },
+              "car": { "type": "string" },
+              "tripType": { "type": "string" },
+              "fare": { "type": "number" },
+              "status": { "type": "string" },
+              "notes": { "type": "string" }
+            }
+          }
+        },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "phone"]
     }
   },
   "firestore": {
@@ -91,6 +130,10 @@
     "/invoices/{invoiceId}": {
       "schema": "InvoiceRecord",
       "description": "Issued invoices and trip memos"
+    },
+    "/customers/{customerId}": {
+      "schema": "CustomerProfile",
+      "description": "CRM Customer profiles, phone numbers, and visit/trip histories"
     }
   }
 }

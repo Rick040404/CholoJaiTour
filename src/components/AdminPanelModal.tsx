@@ -5,7 +5,7 @@ import {
   Sparkles, Megaphone, Save, LogOut, ChevronRight, Eye, EyeOff, RefreshCw,
   MapPin, Check, ChevronDown, User, Tag, Search, Filter, Share2, Copy,
   ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation, Receipt, FileText, Send, Users,
-  Bell, BellRing, CheckCheck
+  Bell, BellRing, CheckCheck, ShieldAlert, KeyRound, History, Unlock, AlertTriangle, Timer, Smartphone
 } from 'lucide-react';
 import { FLEET_CARS, BUSINESS_INFO } from '../data/fleetData';
 import { FleetCar, Language, CRMCustomerProfile, DriverProfile } from '../types';
@@ -33,6 +33,22 @@ import {
   subscribeToLiveCustomers,
   subscribeToLiveDrivers
 } from '../utils/syncService';
+import {
+  verifyAdminPassword,
+  saveNewAdminPassword,
+  getSecurityState,
+  recordFailedAttempt,
+  recordSuccessfulLogin,
+  isSessionValid,
+  invalidateAdminSession,
+  touchSession,
+  getMasterRecoveryKey,
+  verifyAndResetViaMasterKey,
+  getAuditLogs,
+  addAuditLog,
+  evaluatePasswordStrength,
+  SecurityAuditLog
+} from '../utils/security';
 import { InvoiceGenerator } from './InvoiceGenerator';
 import { CRMManager } from './CRMManager';
 import { DriverManagerModal } from './DriverManagerModal';
@@ -101,23 +117,95 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 }) => {
   const isBn = lang === 'bn';
 
-  // Auth State
+  // Auth & Advanced Security State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    return localStorage.getItem('cholo_jai_admin_auth') === 'true';
+    return isSessionValid();
   });
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
+  const [pinErrorMessage, setPinErrorMessage] = useState<string>('');
   const [showPassword, setShowPassword] = useState(false);
-  
-  // Custom Password State
-  const [adminPassword, setAdminPassword] = useState<string>(() => {
-    return localStorage.getItem('cholo_jai_admin_password') || '04048555';
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  // Rate Limiting & Lockout State
+  const [securityState, setSecurityState] = useState(() => getSecurityState());
+  const [lockoutRemainingSeconds, setLockoutRemainingSeconds] = useState<number>(() => {
+    const state = getSecurityState();
+    if (state.lockoutUntil && state.lockoutUntil > Date.now()) {
+      return Math.ceil((state.lockoutUntil - Date.now()) / 1000);
+    }
+    return 0;
   });
+
+  // Session Duration (auto-lock minutes: default 60 mins)
+  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(() => {
+    const saved = localStorage.getItem('cholo_jai_admin_auto_lock_mins');
+    return saved ? parseInt(saved, 10) : 60;
+  });
+
+  // Emergency Recovery Modal State
+  const [showRecoveryModal, setShowRecoveryModal] = useState<boolean>(false);
+  const [recoveryMasterKeyInput, setRecoveryMasterKeyInput] = useState<string>('');
+  const [recoveryNewPassInput, setRecoveryNewPassInput] = useState<string>('');
+  const [showRecoveryPass, setShowRecoveryPass] = useState<boolean>(false);
+  const [recoveryStatus, setRecoveryStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Security Audit Logs
+  const [auditLogs, setAuditLogs] = useState<SecurityAuditLog[]>(() => getAuditLogs());
+
+  // Custom Password State
   const [isChangingPass, setIsChangingPass] = useState(false);
   const [oldPassInput, setOldPassInput] = useState('');
   const [newPassInput, setNewPassInput] = useState('');
   const [confirmPassInput, setConfirmPassInput] = useState('');
+  const [showOldPass, setShowOldPass] = useState(false);
+  const [showNewPass, setShowNewPass] = useState(false);
   const [changePassStatus, setChangePassStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [copiedMasterKey, setCopiedMasterKey] = useState<boolean>(false);
+
+  // Lockout Countdown Interval
+  useEffect(() => {
+    if (lockoutRemainingSeconds <= 0) return;
+    const interval = setInterval(() => {
+      setLockoutRemainingSeconds(prev => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setSecurityState(getSecurityState());
+          setPinError(false);
+          setPinErrorMessage('');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [lockoutRemainingSeconds]);
+
+  // Inactivity Auto-Lock & Session Validator
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const handleUserActivity = () => {
+      touchSession();
+    };
+    window.addEventListener('click', handleUserActivity);
+    window.addEventListener('keydown', handleUserActivity);
+    window.addEventListener('scroll', handleUserActivity);
+
+    // Periodic check for session expiration
+    const sessionCheckInterval = setInterval(() => {
+      if (!isSessionValid()) {
+        setIsAuthenticated(false);
+        setPinErrorMessage(isBn ? 'সেশন মেয়াদ শেষ! পুনরায় লগইন করুন।' : 'Session expired due to inactivity. Please log in again.');
+      }
+    }, 20000);
+
+    return () => {
+      window.removeEventListener('click', handleUserActivity);
+      window.removeEventListener('keydown', handleUserActivity);
+      window.removeEventListener('scroll', handleUserActivity);
+      clearInterval(sessionCheckInterval);
+    };
+  }, [isAuthenticated, isBn]);
 
   // Active Tab: Overview (4-day dispatch matrix), Future Bookings, CRM, Invoices, Announcements, Settings
   const [activeTab, setActiveTab] = useState<'overview' | 'future' | 'crm' | 'invoices' | 'announcements' | 'settings'>('overview');
@@ -254,9 +342,6 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         if (serverData.notice) {
           setNotice(serverData.notice);
           if (onUpdateNotice) onUpdateNotice(serverData.notice);
-        }
-        if (serverData.adminPassword) {
-          setAdminPassword(serverData.adminPassword);
         }
         const now = new Date();
         setLastSyncTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
@@ -482,35 +567,67 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     localStorage.setItem('cholo_jai_admin_bookings', JSON.stringify(bookings));
   }, [bookings]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const currentPass = localStorage.getItem('cholo_jai_admin_password') || '04048555';
-    if (pinInput.trim() === currentPass || pinInput.trim() === '04048555') {
-      setIsAuthenticated(true);
-      setPinError(false);
-      localStorage.setItem('cholo_jai_admin_auth', 'true');
-    } else {
-      setPinError(true);
+    if (lockoutRemainingSeconds > 0) return;
+    if (!pinInput.trim()) return;
+
+    setIsLoggingIn(true);
+    try {
+      const isValid = await verifyAdminPassword(pinInput);
+      if (isValid) {
+        recordSuccessfulLogin(autoLockMinutes);
+        setIsAuthenticated(true);
+        setPinError(false);
+        setPinErrorMessage('');
+        setPinInput('');
+        setSecurityState(getSecurityState());
+        setAuditLogs(getAuditLogs());
+      } else {
+        const failureResult = recordFailedAttempt();
+        setSecurityState(getSecurityState());
+        setAuditLogs(getAuditLogs());
+        setPinError(true);
+
+        if (failureResult.isLocked) {
+          setLockoutRemainingSeconds(failureResult.lockoutSeconds);
+          setPinErrorMessage(
+            isBn 
+              ? `অতিরিক্ত ভুল চেষ্টার কারণে সিস্টেম সাময়িকভাবে ${failureResult.lockoutSeconds} সেকেন্ডের জন্য লক করা হয়েছে!` 
+              : `System temporarily locked for ${failureResult.lockoutSeconds} seconds due to repeated failed attempts!`
+          );
+        } else {
+          setPinErrorMessage(
+            isBn 
+              ? `ভুল পাসওয়ার্ড! আর ${failureResult.remainingAttempts} বার ভুল হলে সিস্টেম লক হয়ে যাবে।` 
+              : `Incorrect password! ${failureResult.remainingAttempts} attempts remaining before temporary security lock.`
+          );
+        }
+      }
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
-  const handleChangePasswordSubmit = (e: React.FormEvent) => {
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const currentPass = localStorage.getItem('cholo_jai_admin_password') || '04048555';
-    if (oldPassInput.trim() !== currentPass && oldPassInput.trim() !== '04048555') {
+    const isOldValid = await verifyAdminPassword(oldPassInput);
+    if (!isOldValid) {
       setChangePassStatus({
         type: 'error',
         message: isBn ? 'বর্তমান পাসওয়ার্ডটি সঠিক নয়!' : 'Current password is incorrect!'
       });
       return;
     }
-    if (newPassInput.trim().length < 4) {
+
+    if (newPassInput.trim().length < 6) {
       setChangePassStatus({
         type: 'error',
-        message: isBn ? 'নতুন পাসওয়ার্ড কমপক্ষে ৪ অক্ষরের হতে হবে।' : 'New password must be at least 4 characters.'
+        message: isBn ? 'নতুন পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে (অক্ষর ও সংখ্যার মিশ্রণ বাঞ্ছনীয়)।' : 'New password must be at least 6 characters.'
       });
       return;
     }
+
     if (newPassInput !== confirmPassInput) {
       setChangePassStatus({
         type: 'error',
@@ -519,28 +636,75 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       return;
     }
 
-    localStorage.setItem('cholo_jai_admin_password', newPassInput.trim());
-    setAdminPassword(newPassInput.trim());
-    // Sync password to Firestore
+    await saveNewAdminPassword(newPassInput.trim());
     syncSaveAdminPassword(newPassInput.trim());
+    setAuditLogs(getAuditLogs());
 
     setOldPassInput('');
     setNewPassInput('');
     setConfirmPassInput('');
     setChangePassStatus({
       type: 'success',
-      message: isBn ? 'পাসওয়ার্ড সফলভাবে পরিবর্তন করা হয়েছে!' : 'Password updated successfully!'
+      message: isBn ? '🔒 পাসওয়ার্ড সফলভাবে SHA-256 এনক্রিপ্ট করে আপডেট ও ক্লাউডে সিঙ্ক করা হয়েছে!' : '🔒 Password updated, SHA-256 hashed, and synced successfully!'
     });
     setTimeout(() => {
       setIsChangingPass(false);
       setChangePassStatus(null);
-    }, 2000);
+    }, 2500);
   };
 
   const handleLogout = () => {
+    invalidateAdminSession('Admin manually logged out');
     setIsAuthenticated(false);
-    localStorage.removeItem('cholo_jai_admin_auth');
     setPinInput('');
+    setAuditLogs(getAuditLogs());
+  };
+
+  const handleRevokeAllSessions = () => {
+    invalidateAdminSession('All admin sessions revoked from settings');
+    setIsAuthenticated(false);
+    setPinInput('');
+    setAuditLogs(getAuditLogs());
+    alert(isBn ? 'সমস্ত অ্যাক্টিভ সেশন বাতিল করা হয়েছে। পুনরায় পাসওয়ার্ড দিয়ে প্রবেশ করুন।' : 'All active sessions revoked. Please log in again.');
+  };
+
+  const handleEmergencyRecoverySubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!recoveryMasterKeyInput.trim() || !recoveryNewPassInput.trim()) return;
+
+    if (recoveryNewPassInput.trim().length < 6) {
+      setRecoveryStatus({
+        type: 'error',
+        message: isBn ? 'নতুন পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' : 'New password must be at least 6 characters.'
+      });
+      return;
+    }
+
+    const resetSuccess = verifyAndResetViaMasterKey(recoveryMasterKeyInput, recoveryNewPassInput);
+    if (resetSuccess) {
+      syncSaveAdminPassword(recoveryNewPassInput.trim());
+      setRecoveryStatus({
+        type: 'success',
+        message: isBn ? 'মাস্টার কি যাচাই হয়েছে এবং পাসওয়ার্ড রিসেট সফল হয়েছে!' : 'Master Key verified & password successfully reset!'
+      });
+      setLockoutRemainingSeconds(0);
+      setSecurityState(getSecurityState());
+      setAuditLogs(getAuditLogs());
+
+      setTimeout(() => {
+        setShowRecoveryModal(false);
+        setRecoveryMasterKeyInput('');
+        setRecoveryNewPassInput('');
+        setRecoveryStatus(null);
+        recordSuccessfulLogin(autoLockMinutes);
+        setIsAuthenticated(true);
+      }, 1500);
+    } else {
+      setRecoveryStatus({
+        type: 'error',
+        message: isBn ? 'ভুল মাস্টার রিকভারি কি (Invalid Master Key)!' : 'Invalid Emergency Master Recovery Key!'
+      });
+    }
   };
 
   const handleSaveNotice = () => {
@@ -861,65 +1025,152 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
         {/* Content Body */}
         {!isAuthenticated ? (
-          /* Login Pin Screen */
-          <div className="p-6 sm:p-12 text-center max-w-md mx-auto my-auto space-y-6">
-            <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 text-white mx-auto flex items-center justify-center shadow-xl shadow-blue-500/25 border border-white/20">
-              <Lock className="w-8 h-8 text-amber-300" />
-            </div>
+          /* Secure Login Screen */
+          <div className="p-6 sm:p-10 text-center max-w-md mx-auto my-auto space-y-6 w-full animate-in fade-in zoom-in-95">
+            
+            {/* Lockout Screen when rate limit / brute-force triggered */}
+            {lockoutRemainingSeconds > 0 ? (
+              <div className="space-y-5 bg-rose-50/80 border border-rose-200 p-6 rounded-3xl shadow-sm">
+                <div className="w-16 h-16 rounded-3xl bg-rose-600 text-white mx-auto flex items-center justify-center shadow-xl shadow-rose-600/30 animate-bounce">
+                  <ShieldAlert className="w-8 h-8 text-amber-300" />
+                </div>
 
-            <div>
-              <h4 className="text-xl font-black text-slate-900">
-                {isBn ? 'অ্যাডমিন সিকিউরিটি অ্যাক্সেস' : 'Admin Security Access'}
-              </h4>
-              <p className="text-xs sm:text-sm text-slate-500 mt-1 font-medium">
-                {isBn 
-                  ? 'গাড়ির বুকিং ও শিডিউল পরিচালনা করতে আপনার গোপন পাসওয়ার্ড দিন' 
-                  : 'Enter your confidential owner password to access bookings & dispatch'}
-              </p>
-            </div>
+                <div>
+                  <h4 className="text-lg font-black text-rose-950">
+                    {isBn ? '⚠️ সিকিউরিটি লক কার্যকর' : '⚠️ Security Lock Active'}
+                  </h4>
+                  <p className="text-xs text-rose-800 mt-1 font-medium leading-relaxed">
+                    {isBn 
+                      ? 'অতিরিক্ত বার ভুল পাসওয়ার্ড চেষ্টার কারণে ব্রুট-ফোর্স প্রতিরোধ ব্যবস্থা স্বয়ংক্রিয়ভাবে সক্রিয় হয়েছে।' 
+                      : 'Anti-brute-force rate limiting triggered due to multiple failed login attempts.'}
+                  </p>
+                </div>
 
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div>
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={pinInput}
-                    onChange={(e) => {
-                      setPinInput(e.target.value);
-                      setPinError(false);
-                    }}
-                    placeholder={isBn ? 'পাসওয়ার্ড লিখুন' : 'Enter Admin Password'}
-                    className={`w-full px-4 py-3.5 rounded-2xl border text-center text-lg font-bold tracking-widest outline-none transition-all pr-12 ${
-                      pinError 
-                        ? 'border-rose-400 bg-rose-50 text-rose-900 focus:ring-2 focus:ring-rose-400' 
-                        : 'border-slate-200 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 bg-slate-50'
-                    }`}
-                    autoFocus
-                  />
+                {/* Animated Countdown Timer */}
+                <div className="bg-white px-5 py-3.5 rounded-2xl border border-rose-200/80 shadow-xs inline-flex flex-col items-center justify-center">
+                  <span className="text-[11px] font-bold text-rose-700 uppercase tracking-wider flex items-center gap-1">
+                    <Timer className="w-3.5 h-3.5 text-rose-600 animate-spin" />
+                    {isBn ? 'লক খোলার বাকি সময়:' : 'Cooldown Remaining:'}
+                  </span>
+                  <span className="text-2xl font-black font-mono text-rose-900 tracking-wider mt-0.5">
+                    {Math.floor(lockoutRemainingSeconds / 60)}:{(lockoutRemainingSeconds % 60).toString().padStart(2, '0')}
+                  </span>
+                </div>
+
+                <div className="pt-2">
                   <button
                     type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
-                    title={showPassword ? "Hide password" : "Show password"}
+                    onClick={() => setShowRecoveryModal(true)}
+                    className="text-xs font-black text-indigo-700 hover:text-indigo-900 hover:underline flex items-center justify-center gap-1 mx-auto"
                   >
-                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                    <KeyRound className="w-3.5 h-3.5" />
+                    <span>{isBn ? 'জরুরি মাস্টার কি দিয়ে আনলক করুন' : 'Unlock via Emergency Master Key'}</span>
                   </button>
                 </div>
-                {pinError && (
-                  <p className="text-xs text-rose-600 font-bold mt-2 flex items-center justify-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5" />
-                    <span>{isBn ? 'ভুল পাসওয়ার্ড! আবার চেষ্টা করুন।' : 'Incorrect password. Please try again.'}</span>
-                  </p>
-                )}
               </div>
+            ) : (
+              /* Standard Secure Login Form */
+              <div className="space-y-6">
+                <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 text-white mx-auto flex items-center justify-center shadow-xl shadow-blue-500/25 border border-white/20">
+                  <Lock className="w-8 h-8 text-amber-300" />
+                </div>
 
-              <button
-                type="submit"
-                className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-700 hover:to-indigo-700 text-white font-extrabold text-sm transition-all shadow-lg shadow-blue-500/25 active:scale-98"
-              >
-                {isBn ? 'প্যানেলে প্রবেশ করুন →' : 'Unlock Dashboard →'}
-              </button>
-            </form>
+                <div>
+                  <h4 className="text-xl font-black text-slate-900">
+                    {isBn ? 'অ্যাডমিন সিকিউরিটি অ্যাক্সেস' : 'Admin Security Access'}
+                  </h4>
+                  <p className="text-xs sm:text-sm text-slate-500 mt-1 font-medium">
+                    {isBn 
+                      ? 'গাড়ির বুকিং ও শিডিউল পরিচালনা করতে আপনার গোপন পাসওয়ার্ড দিন' 
+                      : 'Enter your confidential owner password to access bookings & dispatch'}
+                  </p>
+                </div>
+
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <div className="relative">
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        value={pinInput}
+                        onChange={(e) => {
+                          setPinInput(e.target.value);
+                          setPinError(false);
+                          setPinErrorMessage('');
+                        }}
+                        placeholder={isBn ? 'পাসওয়ার্ড লিখুন' : 'Enter Admin Password'}
+                        className={`w-full px-4 py-3.5 rounded-2xl border text-center text-lg font-bold tracking-widest outline-none transition-all pr-12 ${
+                          pinError 
+                            ? 'border-rose-400 bg-rose-50 text-rose-900 focus:ring-2 focus:ring-rose-400' 
+                            : 'border-slate-200 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 bg-slate-50'
+                        }`}
+                        autoFocus
+                        disabled={isLoggingIn}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                        title={showPassword ? "Hide password" : "Show password"}
+                      >
+                        {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                      </button>
+                    </div>
+
+                    {pinError && (
+                      <div className="mt-2.5 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-start justify-center gap-1.5 text-left">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <span>{pinErrorMessage || (isBn ? 'ভুল পাসওয়ার্ড! আবার চেষ্টা করুন।' : 'Incorrect password. Please try again.')}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Session Duration Selector */}
+                  <div className="flex items-center justify-between text-[11px] text-slate-600 px-1">
+                    <span className="font-semibold">{isBn ? 'অটো-লক সময়:' : 'Auto-lock duration:'}</span>
+                    <select
+                      value={autoLockMinutes}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        setAutoLockMinutes(val);
+                        localStorage.setItem('cholo_jai_admin_auto_lock_mins', val.toString());
+                      }}
+                      className="bg-slate-100 text-slate-800 font-bold px-2 py-1 rounded-lg border border-slate-200 text-[11px] outline-none"
+                    >
+                      <option value={15}>{isBn ? '১৫ মিনিট (উচ্চ নিরাপত্তা)' : '15 min (High Security)'}</option>
+                      <option value={60}>{isBn ? '১ ঘন্টা (স্ট্যান্ডার্ড)' : '1 Hour (Standard)'}</option>
+                      <option value={240}>{isBn ? '৪ ঘন্টা' : '4 Hours'}</option>
+                      <option value={720}>{isBn ? '১২ ঘন্টা' : '12 Hours'}</option>
+                      <option value={1440}>{isBn ? '২৪ ঘন্টা (এই ডিভাইসে)' : '24 Hours (This device)'}</option>
+                    </select>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-700 hover:to-indigo-700 text-white font-extrabold text-sm transition-all shadow-lg shadow-blue-500/25 active:scale-98 cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
+                  >
+                    {isLoggingIn && <RefreshCw className="w-4 h-4 animate-spin" />}
+                    <span>{isBn ? 'প্যানেলে প্রবেশ করুন →' : 'Unlock Dashboard →'}</span>
+                  </button>
+
+                  <div className="pt-2 flex items-center justify-between gap-2 text-[11px] border-t border-slate-100 mt-4">
+                    <div className="flex items-center gap-1 text-slate-500 font-medium">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{isBn ? 'SHA-256 এনক্রিপ্টেড' : 'SHA-256 Encrypted'}</span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowRecoveryModal(true)}
+                      className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+                    >
+                      {isBn ? 'পাসওয়ার্ড ভুলে গেছেন?' : 'Forgot Password / Master Key'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
           </div>
         ) : (
           /* Authenticated Admin Dashboard */
@@ -1942,16 +2193,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Password Management */}
+                  {/* Password & Cryptographic Security */}
                   <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                     <div className="flex items-center justify-between">
                       <div>
                         <h4 className="text-base font-bold text-slate-900 flex items-center gap-2">
                           <Key className="w-5 h-5 text-indigo-600" />
-                          <span>{isBn ? 'অ্যাডমিন পাসওয়ার্ড পরিবর্তন' : 'Change Admin Password'}</span>
+                          <span>{isBn ? 'অ্যাডমিন পাসওয়ার্ড ও SHA-256 সিকিউরিটি' : 'Admin Password & Security'}</span>
                         </h4>
                         <p className="text-xs text-slate-500">
-                          {isBn ? 'আপনার লগইন সিকিউরিটি পাসওয়ার্ড আপডেট করুন' : 'Update the secure login password for this admin panel'}
+                          {isBn ? 'লগইন পাসওয়ার্ড আপডেট করুন (SHA-256 এনক্রিপ্টেড)' : 'Update your owner password with real-time strength validation'}
                         </p>
                       </div>
 
@@ -1961,9 +2212,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             setIsChangingPass(true);
                             setChangePassStatus(null);
                           }}
-                          className="py-1.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold border border-indigo-200 transition-colors"
+                          className="py-1.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold border border-indigo-200 transition-colors cursor-pointer"
                         >
-                          {isBn ? 'পাসওয়ার্ড বদলান' : 'Change'}
+                          {isBn ? 'পাসওয়ার্ড পরিবর্তন' : 'Change Password'}
                         </button>
                       )}
                     </div>
@@ -1982,14 +2233,23 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                           <label className="block text-xs font-bold text-slate-700 mb-1">
                             {isBn ? 'বর্তমান পাসওয়ার্ড:' : 'Current Password:'}
                           </label>
-                          <input
-                            type="password"
-                            value={oldPassInput}
-                            onChange={(e) => setOldPassInput(e.target.value)}
-                            placeholder="Enter current password"
-                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-indigo-600 outline-none"
-                            required
-                          />
+                          <div className="relative">
+                            <input
+                              type={showOldPass ? 'text' : 'password'}
+                              value={oldPassInput}
+                              onChange={(e) => setOldPassInput(e.target.value)}
+                              placeholder="Enter current password"
+                              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-indigo-600 outline-none pr-10"
+                              required
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowOldPass(!showOldPass)}
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                            >
+                              {showOldPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1997,14 +2257,23 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             <label className="block text-xs font-bold text-slate-700 mb-1">
                               {isBn ? 'নতুন পাসওয়ার্ড:' : 'New Password:'}
                             </label>
-                            <input
-                              type="password"
-                              value={newPassInput}
-                              onChange={(e) => setNewPassInput(e.target.value)}
-                              placeholder="Min 4 characters"
-                              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-indigo-600 outline-none"
-                              required
-                            />
+                            <div className="relative">
+                              <input
+                                type={showNewPass ? 'text' : 'password'}
+                                value={newPassInput}
+                                onChange={(e) => setNewPassInput(e.target.value)}
+                                placeholder="Min 6 characters"
+                                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-indigo-600 outline-none pr-10"
+                                required
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowNewPass(!showNewPass)}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                              >
+                                {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            </div>
                           </div>
 
                           <div>
@@ -2022,10 +2291,50 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                           </div>
                         </div>
 
+                        {/* Password Strength Meter */}
+                        {newPassInput && (() => {
+                          const strength = evaluatePasswordStrength(newPassInput);
+                          return (
+                            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="font-bold text-slate-600">
+                                  {isBn ? 'পাসওয়ার্ড শক্তি মান:' : 'Password Strength:'}
+                                </span>
+                                <span className="font-extrabold capitalize" style={{ color: strength.color }}>
+                                  {strength.label}
+                                </span>
+                              </div>
+                              <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                                <div 
+                                  className="h-full transition-all duration-300 rounded-full"
+                                  style={{ 
+                                    width: `${(strength.score / 5) * 100}%`,
+                                    backgroundColor: strength.color 
+                                  }}
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500 pt-1">
+                                <span className={strength.checks.length ? 'text-emerald-600 font-bold' : ''}>
+                                  {strength.checks.length ? '✓' : '•'} {isBn ? 'কমপক্ষে ৬ অক্ষর' : 'Min 6 characters'}
+                                </span>
+                                <span className={strength.checks.hasNumber ? 'text-emerald-600 font-bold' : ''}>
+                                  {strength.checks.hasNumber ? '✓' : '•'} {isBn ? 'সংখ্যা (০-৯)' : 'Includes numbers'}
+                                </span>
+                                <span className={strength.checks.hasUpper ? 'text-emerald-600 font-bold' : ''}>
+                                  {strength.checks.hasUpper ? '✓' : '•'} {isBn ? 'বড় হাতের অক্ষর' : 'Uppercase letters'}
+                                </span>
+                                <span className={strength.checks.hasSymbol ? 'text-emerald-600 font-bold' : ''}>
+                                  {strength.checks.hasSymbol ? '✓' : '•'} {isBn ? 'স্পেশাল চিহ্ন (@#$)' : 'Symbols & special chars'}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
                         <div className="flex gap-2 pt-2">
                           <button
                             type="submit"
-                            className="py-2 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm"
+                            className="py-2 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm cursor-pointer"
                           >
                             {isBn ? 'পাসওয়ার্ড সেভ করুন' : 'Save New Password'}
                           </button>
@@ -2035,13 +2344,145 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               setIsChangingPass(false);
                               setChangePassStatus(null);
                             }}
-                            className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+                            className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer"
                           >
                             {isBn ? 'বাতিল' : 'Cancel'}
                           </button>
                         </div>
                       </form>
                     )}
+                  </div>
+
+                  {/* Emergency Master Recovery Key Card */}
+                  <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-5 rounded-2xl border border-indigo-200 shadow-xs space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                          <KeyRound className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                            {isBn ? 'জরুরি মাস্টার রিকভারি কি (Emergency Master Key)' : 'Emergency Master Recovery Key'}
+                          </h4>
+                          <p className="text-[11px] text-slate-500">
+                            {isBn ? 'পাসওয়ার্ড ভুলে গেলে বা অ্যাকাউন্ট লক হলে এই কি ব্যবহার করে সাথে সাথে রিসেট করতে পারবেন।' : 'Confidential owner master key for instant account rescue & password reset.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(getMasterRecoveryKey());
+                          setCopiedMasterKey(true);
+                          setTimeout(() => setCopiedMasterKey(false), 2000);
+                        }}
+                        className="py-1.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1 shadow-xs active:scale-95 shrink-0 cursor-pointer"
+                      >
+                        {copiedMasterKey ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedMasterKey ? (isBn ? 'কপি হয়েছে' : 'Copied') : (isBn ? 'কপি কি' : 'Copy Key')}</span>
+                      </button>
+                    </div>
+
+                    <div className="p-3 bg-white rounded-xl border border-indigo-100 flex items-center justify-between">
+                      <span className="font-mono text-xs font-black text-indigo-900 tracking-wider">
+                        {getMasterRecoveryKey()}
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                        {isBn ? 'সক্রিয় ও স্থায়ী' : 'Active & Permanent'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Active Session & Auto-Lock Configuration */}
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                    <h4 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <Timer className="w-5 h-5 text-blue-600" />
+                      <span>{isBn ? 'অ্যাক্টিভ সেশন ও অটো-লক পলিসি' : 'Active Session & Auto-Lock Policy'}</span>
+                    </h4>
+
+                    <div className="space-y-3 text-xs">
+                      <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200">
+                        <div>
+                          <span className="text-slate-800 font-bold block">{isBn ? 'অটো-লক নিষ্ক্রিয়তার সময়:' : 'Inactivity Auto-Lock Duration:'}</span>
+                          <span className="text-[11px] text-slate-500">{isBn ? 'কোনো মাউস বা কিবোর্ড স্পর্শ না থাকলে স্বয়ংক্রিয় লক হবে' : 'Automatically locks panel after period of inactivity'}</span>
+                        </div>
+                        <select
+                          value={autoLockMinutes}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value, 10);
+                            setAutoLockMinutes(val);
+                            localStorage.setItem('cholo_jai_admin_auto_lock_mins', val.toString());
+                          }}
+                          className="bg-white text-slate-800 font-bold px-3 py-1.5 rounded-xl border border-slate-300 text-xs outline-none focus:border-blue-600"
+                        >
+                          <option value={15}>{isBn ? '১৫ মিনিট' : '15 Minutes'}</option>
+                          <option value={60}>{isBn ? '১ ঘন্টা (প্রস্তাবিত)' : '1 Hour (Recommended)'}</option>
+                          <option value={240}>{isBn ? '৪ ঘন্টা' : '4 Hours'}</option>
+                          <option value={720}>{isBn ? '১২ ঘন্টা' : '12 Hours'}</option>
+                          <option value={1440}>{isBn ? '২৪ ঘন্টা' : '24 Hours'}</option>
+                        </select>
+                      </div>
+
+                      <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <span className="font-bold text-slate-800 block">{isBn ? 'বর্তমান সেশন সমাপ্তি ও লক:' : 'Session Invalidation:'}</span>
+                          <span className="text-[11px] text-slate-500">{isBn ? 'সব ডিভাইসের অ্যাডমিন অ্যাক্সেস সাথে সাথে লক করুন' : 'Revoke authorization token and lock dashboard now'}</span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleRevokeAllSessions}
+                          className="py-2 px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs shrink-0 cursor-pointer active:scale-95"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          <span>{isBn ? 'সব সেশন বাতিল ও লক করুন' : 'Revoke & Lock Dashboard'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Security Audit Log */}
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                        <History className="w-5 h-5 text-indigo-600" />
+                        <span>{isBn ? 'সিকিউরিটি অডিট লগ (Security Audit Trail)' : 'Security Audit Trail'}</span>
+                      </h4>
+                      <span className="text-[11px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                        {auditLogs.length} {isBn ? 'টি রেকর্ড' : 'Events'}
+                      </span>
+                    </div>
+
+                    <div className="max-h-56 overflow-y-auto space-y-2 pr-1 border border-slate-100 rounded-xl p-2 bg-slate-50/50">
+                      {auditLogs.length === 0 ? (
+                        <p className="text-xs text-slate-400 text-center py-4">{isBn ? 'কোনো অডিট লগ রেকর্ড নেই।' : 'No security events recorded yet.'}</p>
+                      ) : (
+                        auditLogs.slice(0, 15).map((log) => (
+                          <div key={log.id} className="p-2.5 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between text-xs gap-2">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase ${
+                                  log.status === 'success' ? 'bg-emerald-100 text-emerald-800' :
+                                  log.status === 'danger' ? 'bg-rose-100 text-rose-800' :
+                                  log.status === 'warning' ? 'bg-amber-100 text-amber-800' :
+                                  'bg-blue-100 text-blue-800'
+                                }`}>
+                                  {log.action}
+                                </span>
+                                <span className="text-[11px] text-slate-700 font-medium truncate">
+                                  {log.details}
+                                </span>
+                              </div>
+                            </div>
+
+                            <span className="text-[10px] text-slate-400 font-mono shrink-0 whitespace-nowrap">
+                              {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
 
                   {/* Clear Data Reset */}
@@ -2066,7 +2507,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             alert(isBn ? 'সকল বুকিং সফলভাবে মুছে ফেলা হয়েছে।' : 'All bookings have been cleared.');
                           }
                         }}
-                        className="py-2 px-3.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold border border-rose-200 transition-colors"
+                        className="py-2 px-3.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold border border-rose-200 transition-colors cursor-pointer"
                       >
                         {isBn ? 'সমস্ত বুকিং ডেটা ক্লিয়ার করুন' : 'Clear All Bookings Data'}
                       </button>
@@ -2663,6 +3104,111 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         }}
         lang={lang}
       />
+
+      {/* EMERGENCY MASTER RECOVERY MODAL */}
+      {showRecoveryModal && (
+        <div className="fixed inset-0 z-70 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-500/25">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-slate-900">
+                    {isBn ? 'জরুরি মাস্টার কি রিকভারি' : 'Emergency Master Recovery'}
+                  </h4>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    {isBn ? 'মাস্টার কি দিয়ে অ্যাকাউন্ট আনলক ও নতুন পাসওয়ার্ড সেট' : 'Rescue account & reset master password'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRecoveryModal(false);
+                  setRecoveryStatus(null);
+                  setRecoveryMasterKeyInput('');
+                  setRecoveryNewPassInput('');
+                }}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleEmergencyRecoverySubmit} className="space-y-4 text-xs">
+              {recoveryStatus && (
+                <div className={`p-3 rounded-xl font-bold flex items-start gap-2 ${
+                  recoveryStatus.type === 'success' 
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' 
+                    : 'bg-rose-50 text-rose-800 border border-rose-200'
+                }`}>
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{recoveryStatus.message}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  {isBn ? 'জরুরি মাস্টার রিকভারি কি (Master Key):' : 'Emergency Master Key:'}
+                </label>
+                <input
+                  type="text"
+                  value={recoveryMasterKeyInput}
+                  onChange={(e) => setRecoveryMasterKeyInput(e.target.value)}
+                  placeholder="e.g. CJ-ADMIN-8555-SECURE"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono font-bold focus:border-indigo-600 outline-none uppercase"
+                  required
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  {isBn ? 'নতুন পাসওয়ার্ড দিন:' : 'Set New Admin Password:'}
+                </label>
+                <div className="relative">
+                  <input
+                    type={showRecoveryPass ? 'text' : 'password'}
+                    value={recoveryNewPassInput}
+                    onChange={(e) => setRecoveryNewPassInput(e.target.value)}
+                    placeholder={isBn ? 'কমপক্ষে ৬ অক্ষর' : 'Min 6 characters'}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-bold focus:border-indigo-600 outline-none pr-10"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowRecoveryPass(!showRecoveryPass)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  >
+                    {showRecoveryPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="submit"
+                  className="flex-1 py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs shadow-md shadow-indigo-500/25 active:scale-98 cursor-pointer"
+                >
+                  {isBn ? 'রিসেট করে আনলক করুন →' : 'Reset & Unlock Now →'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecoveryModal(false);
+                    setRecoveryStatus(null);
+                  }}
+                  className="py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer"
+                >
+                  {isBn ? 'বাতিল' : 'Cancel'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
     </div>
   );

@@ -13,6 +13,7 @@ import {
 import { db } from '../firebase';
 import { BookingLead, CarDaySchedule, NoticeBannerConfig } from '../components/AdminPanelModal';
 import { FleetCar, OccasionBroadcastState, CRMCustomerProfile, CustomerVisitRecord, DriverProfile } from '../types';
+import { sha256Hash } from './security';
 
 export interface ServerSyncData {
   bookings: BookingLead[];
@@ -281,7 +282,16 @@ export async function fetchLiveServerData(): Promise<ServerSyncData | null> {
     }
 
     const authDoc = await getDoc(doc(db, 'settings', 'auth'));
-    const adminPassword = authDoc.exists() ? authDoc.data().adminPassword : undefined;
+    let adminPassword: string | undefined = undefined;
+    if (authDoc.exists()) {
+      const authData = authDoc.data();
+      if (authData.adminPasswordHash) {
+        localStorage.setItem('cholo_jai_admin_password_hash', authData.adminPasswordHash);
+      } else if (authData.adminPassword) {
+        const hash = await sha256Hash(authData.adminPassword);
+        localStorage.setItem('cholo_jai_admin_password_hash', hash);
+      }
+    }
 
     return {
       bookings,
@@ -431,17 +441,18 @@ export async function syncSaveFleet(cars: FleetCar[]): Promise<boolean> {
 }
 
 /**
- * Save custom admin password to Cloud Firestore
+ * Save custom admin password to Cloud Firestore with SHA-256 encryption
  */
 export async function syncSaveAdminPassword(password: string): Promise<boolean> {
   try {
+    const hash = await sha256Hash(password);
     const docRef = doc(db, 'settings', 'auth');
     await setDoc(docRef, {
-      adminPassword: password,
+      adminPasswordHash: hash,
       updatedAt: new Date().toISOString()
     }, { merge: true });
 
-    localStorage.setItem('cholo_jai_admin_password', password);
+    localStorage.setItem('cholo_jai_admin_password_hash', hash);
     return true;
   } catch (err) {
     console.error('Error saving admin password to Firestore:', err);

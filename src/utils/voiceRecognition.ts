@@ -1,8 +1,8 @@
 /**
  * Bengali Voice Recognition & Smart Dispatch Parser
  * Uses Web Speech API (webkitSpeechRecognition / SpeechRecognition)
- * with bn-IN (Bengali India) locale, microphone permission handling,
- * and intelligent semantic entity extraction for Local Trips & Driver Dispatch.
+ * with bn-IN (Bengali India) / en-IN locale, microphone permission handling,
+ * mobile device detection, and universal semantic entity extraction for Local Trips & Driver Dispatch.
  */
 
 import { DriverProfile, FleetCar } from '../types';
@@ -108,6 +108,40 @@ export function isSpeechRecognitionSupported(): boolean {
 }
 
 /**
+ * Detect if current device is a mobile or tablet
+ */
+export function isMobileDevice(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+         (window.innerWidth <= 768);
+}
+
+/**
+ * Request explicit microphone permission on mobile/desktop browsers
+ * Prompts native mobile permission sheet cleanly.
+ */
+export async function requestMicrophonePermission(): Promise<{ granted: boolean; error?: string }> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return { granted: true };
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(track => track.stop());
+    return { granted: true };
+  } catch (err: any) {
+    console.warn('Microphone permission request error:', err);
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      return { 
+        granted: false, 
+        error: 'মাইক্রোফোন পারমিশন বন্ধ আছে। মোবাইলের ব্রাউজার সেটিংসে গিয়ে Microphone Allow করুন অথবা নিচে কীবোর্ডের মাইক দিয়ে মুখে বলুন।' 
+      };
+    }
+    return { granted: false, error: err.message || 'Microphone access failed' };
+  }
+}
+
+/**
  * Convert all Bengali numerals (০-৯) to English digits (0-9)
  */
 export function convertBengaliDigitsToAscii(text: string): string {
@@ -171,7 +205,6 @@ export function extractPhoneNumber(transcript: string): string | undefined {
     if (indianMobileMatch) {
       return indianMobileMatch[0];
     }
-    // Otherwise return last 10 digits
     return allDigits.slice(-10);
   }
 
@@ -350,9 +383,129 @@ export function matchDriverFromTranscript(
 }
 
 /**
+ * Universal Customer / Passenger Name Extractor from Spoken Transcript
+ * Supports ANY arbitrary or novel passenger name in Bengali, English, Hinglish, or mixed speech.
+ */
+export function extractCustomerNameFromSpeech(
+  transcript: string,
+  driverName?: string
+): string | undefined {
+  if (!transcript || !transcript.trim()) return undefined;
+
+  const raw = transcript.trim();
+
+  // Words that should never be recognized as a customer name
+  const STOP_WORDS = new Set([
+    'জামালপুর', 'বর্ধমান', 'মেমারি', 'কলকাতা', 'শক্তিগড়', 'কালনা', 'তারাপীঠ', 'মায়াপুর', 'দিঘা', 'নবাবহাট', 'গুসকরা', 'ভাতার', 'হাওড়া', 'শিয়ালদহ', 'অনাময়', 'হাসপাতাল', 'মেডিকেল', 'স্টেশন', 'বাজার', 'এয়ারপোর্ট', 'বিমানবন্দর',
+    'jamalpur', 'bardhaman', 'burdwan', 'memari', 'kolkata', 'airport', 'shaktigarh', 'tarapith', 'digha', 'howrah', 'sealdah',
+    'থেকে', 'থেকেও', 'যাব', 'যাবে', 'যাবেন', 'যেতে', 'অব্দি', 'পর্যন্ত', 'পৌঁছাবে', 'পৌঁছাতে', 'from', 'to',
+    'হলো', 'হবে', 'হচ্ছে', 'হল', 'হলেন', 'থাকে', 'আছে', 'is', 'was', 'are', 'named',
+    'গাড়ি', 'গাড়ির', 'গাড়িতে', 'কার', 'car', 'cab', 'taxi', 'ট্যাক্সি', 'স্করপিও', 'ওয়াগন', 'ডিজায়ার', 'রুমিয়ন', 'আর্টিগা', 'scorpio', 'wagonr', 'dzire', 'ertiga', 'rumion',
+    'ড্রাইভার', 'চালক', 'ড্রাইভারের', 'driver',
+    'টাকা', 'ভাড়া', 'ভাড়া', 'টাকায়', 'rate', 'fare', 'price',
+    'ফোন', 'মোবাইল', 'নম্বর', 'নাম্বার', 'phone', 'mobile', 'call', 'contact', 'number', 'no',
+    'সকাল', 'রাত', 'দুপুর', 'বিকেল', 'সন্ধ্যা', 'সন্ধা', 'ভোর', 'morning', 'afternoon', 'evening', 'night',
+    'আজ', 'আজকে', 'কাল', 'কালকে', 'আগামীকাল', 'পরশু', 'পরশুদিন', 'today', 'tomorrow', 'তারিখ',
+    'বুকিং', 'booking', 'ট্রিপ', 'trip', 'ট্যুর', 'tour', 'লোকাল', 'local',
+    'এসি', 'নন-এসি', 'ac', 'non-ac', 'সিটার', 'seater', '৭', '৯', '৫', '7', '9', '5', 'না', 'হ্যাঁ', 'yes', 'no'
+  ]);
+
+  // Clean a candidate string (remove trailing punctuation, stop words, honorifics)
+  const cleanCandidate = (candidate: string): string => {
+    let text = candidate.replace(/[.,/#!$%^&*;:{}=\-_`~()|।!?+]/g, ' ').replace(/\s+/g, ' ').trim();
+    // Strip leading connectors
+    text = text.replace(/^(?:হলো|হবে|হচ্ছে|হল|হলেন|থাকে|is|was|are|named|called|of)\s+/i, '');
+    // Strip leading honorifics
+    text = text.replace(/^(?:শ্রী|শ্রীযুক্ত|শ্রীমতি|মিস্টার|মিঃ|মিস্টার্স|সাহেব|mr\.?|mrs\.?|ms\.?|shri|dr\.?|md\.?|sk\.?)\s+/i, '');
+    // Strip trailing honorifics
+    text = text.replace(/\s+(?:বাবু|বাবুটি|বাবুড়|মহাশয়|সাহেব|দা)$/i, '');
+    // Strip trailing boundary words if any leaked through
+    text = text.replace(/\s+(?:ফোন|মোবাইল|phone|mobile|নম্বর|নাম্বার|number|থেকে|from|যাব|যাবে|যাবেন|to|ড্রাইভার|চালক|driver|টাকা|ভাড়া|ভাড়া|সকাল|রাত|আজ|কাল).*/i, '');
+    return text.trim();
+  };
+
+  const isValidName = (name: string): boolean => {
+    if (!name || name.length < 2) return false;
+    const lowerName = name.toLowerCase();
+    if (STOP_WORDS.has(lowerName)) return false;
+    if (driverName && (lowerName.includes(driverName.toLowerCase()) || driverName.toLowerCase().includes(lowerName))) {
+      return false;
+    }
+    // If it has too many digits
+    const digitsOnly = name.replace(/\D/g, '');
+    if (digitsOnly.length >= 3) return false;
+
+    // Check if tokens are all stop words
+    const words = name.split(/\s+/);
+    if (words.length === 0) return false;
+    const validWords = words.filter(w => !STOP_WORDS.has(w.toLowerCase()));
+    return validWords.length > 0;
+  };
+
+  // Pattern 1: Explicit prefix markers:
+  // "যাত্রীর নাম [নাম]", "যাত্রী [নাম]", "যাত্রীটি [নাম]", "কাস্টমারের নাম [নাম]", "কাস্টমার [নাম]", "প্যাসেঞ্জার [নাম]", "গ্রাহকের নাম [নাম]", "গ্রাহক [নাম]", "বুকিং নাম [নাম]"
+  // English: "passenger name [name]", "passenger is [name]", "passenger [name]", "customer name [name]", "customer is [name]", "customer [name]", "client name [name]", "booking name [name]"
+  const prefixRegex = /(?:যাত্রীর?\s*নাম|যাত্রীটি|যাত্রী|কাস্টমারের?\s*নাম|কাস্টমার|প্যাসেঞ্জারের?\s*নাম|প্যাসেঞ্জার|গ্রাহকের?\s*নাম|গ্রাহক|বুকিং\s*নাম|passenger\s*name|passenger\s*is|passenger|customer\s*name|customer\s*is|customer|client\s*name|client|booking\s*name)\s*(?:হলেন|হচ্ছে|হলো|হল|হবে|is|was|:|–|-)?\s*([^\s,।!?\n]+(?:\s+[^\s,।!?\n]+){0,3})/gi;
+
+  let match;
+  while ((match = prefixRegex.exec(raw)) !== null) {
+    if (match[1]) {
+      const candidate = cleanCandidate(match[1]);
+      if (isValidName(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Pattern 2: Standalone "নাম [নাম]" / "name is [name]" (with word boundary to NEVER match "নাম্বার")
+  const standAloneNameRegex = /(?:^|[\s,।])(?:নাম|নামটি|name)\s*(?:হলো|হবে|হচ্ছে|হল|হলেন|is|:)\s*([^\s,।!?\n]+(?:\s+[^\s,।!?\n]+){0,3})/gi;
+  while ((match = standAloneNameRegex.exec(raw)) !== null) {
+    if (match[1]) {
+      const candidate = cleanCandidate(match[1]);
+      if (isValidName(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Pattern 3: Suffix markers: "[নাম] বাবুর বুকিং" / "[নাম] বাবুর গাড়ি" / "[নাম] এর বুকিং" / "[নাম] এর গাড়ি"
+  const suffixRegex = /([^\s,।!?\n]+(?:\s+[^\s,।!?\n]+){0,2})\s*(?:বাবুর\s*বুকিং|বাবুর\s*গাড়ি|বাবুর\s*জন্য|এর\s*বুকিং|এর\s*গাড়ি|এর\s*জন্য\s*গাড়ি)/gi;
+  while ((match = suffixRegex.exec(raw)) !== null) {
+    if (match[1]) {
+      const candidate = cleanCandidate(match[1]);
+      if (isValidName(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Pattern 4: Spoken right before Phone Keyword: "[নাম] ফোন [নম্বর]" / "[নাম] মোবাইল [নম্বর]" / "[নাম] phone [number]"
+  const beforePhoneRegex = /([^\s,।!?\n]+(?:\s+[^\s,।!?\n]+){0,2})\s*(?:ফোন|মোবাইল|phone|mobile|contact|call)\s*(?:হলো|হবে|is|:|–|-)?\s*(?:[০-৯0-9\s-]{6,})/gi;
+  while ((match = beforePhoneRegex.exec(raw)) !== null) {
+    if (match[1]) {
+      const candidate = cleanCandidate(match[1]);
+      if (isValidName(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Pattern 5: Sentence initial name before route: "[নাম] জামালপুর থেকে..."
+  const initialMatch = raw.match(/^([^\s,।!?\n]+(?:\s+[^\s,।!?\n]+){0,2})\s+(?:থেকে|from|যাব|যাবে|যাবেন)/i);
+  if (initialMatch && initialMatch[1]) {
+    const candidate = cleanCandidate(initialMatch[1]);
+    if (isValidName(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Parse full voice speech command for Bengali Trip & Dispatch:
  * Extracts into dedicated fields:
- * - Customer Name -> customerName (e.g. "যাত্রী বিকাশ ঘোষ", "কাস্টমার অমল বাবু", "নাম সুবীর সেন")
+ * - Customer Name -> customerName (e.g. ANY spoken name: "যাত্রী সৌমেন পাল", "কাস্টমার রঞ্জন সাহা", "নাম তন্ময় ঘোষ")
  * - Customer Phone -> customerPhone (e.g. "ফোন ৯১৫৩৩০২৫১৭", "মোবাইল ৯৮৭৬৫৪৩২১০")
  * - Pickup location -> pickup (e.g. "জামালপুর থেকে", "বর্ধমান থেকে")
  * - Destination location -> destination (e.g. "বর্ধমানে যাব", "মেমারি বাজার", "কলকাতা বিমানবন্দর")
@@ -382,47 +535,8 @@ export function parseBengaliVoiceCommand(
   const detectedDate = extractDateFromSpeech(transcript);
   const detectedCarId = extractCarFromSpeech(transcript, cars);
 
-  // 1. Detect Customer Name
-  let detectedCustomerName: string | undefined;
-  
-  // Patterns: "যাত্রী [নাম]", "যাত্রীর নাম [নাম]", "কাস্টমার [নাম]", "প্যাসেঞ্জার [নাম]", "নাম [নাম]", "[নাম] এর বুকিং", "[নাম] বাবু"
-  const namePatterns = [
-    /(?:যাত্রীর?\s*নাম|কাস্টমার|প্যাসেঞ্জার|যাত্রী|যাত্রীটি|customer|passenger)\s*(?:হলেন|হচ্ছে|হল|is|:|–|-)?\s*([^\s,।]+(?:\s+[^\s,।]+)?)/i,
-    /নাম\s*(?:হলো|হবে|হচ্ছে|is|:)?\s*([^\s,।]+(?:\s+[^\s,।]+)?)/i,
-    /([^\s,।]+(?:\s+[^\s,।]+)?)\s*(?:বাবুর\s*বুকিং|এর\s*বুকিং|এর\s*গাড়ি)/i
-  ];
-
-  for (const pattern of namePatterns) {
-    const match = transcript.match(pattern);
-    if (match && match[1]) {
-      const rawName = match[1].trim();
-      const excludedKeywords = [
-        'হচ্ছে', 'হলো', 'হবে', 'থেকে', 'যাবেন', 'যাবে', 'যাব', 'গাড়ি', 'গাড়ির', 
-        'ড্রাইভার', 'চালক', 'টাকা', 'ফোন', 'মোবাইল', 'সকাল', 'রাত', 'আজ', 'কাল',
-        'জামালপুর', 'বর্ধমান', 'মেমারি', 'কলকাতা', 'তারাপীঠ', 'ভাড়া', 'ভাড়া'
-      ];
-      if (!excludedKeywords.includes(rawName.toLowerCase()) && rawName.length >= 2) {
-        // Strip trailing keywords like "ফোন" or "মোবাইল"
-        const cleanName = rawName.replace(/(?:ফোন|মোবাইল|ড্রাইভার|টাকা|থেকে|যাব|যাবেন|সকাল|রাত).*/i, '').trim();
-        if (cleanName.length >= 2) {
-          detectedCustomerName = cleanName;
-          break;
-        }
-      }
-    }
-  }
-
-  // Fallback: Check if name is spoken right before phone (e.g. "বিকাশ ঘোষ ফোন ৯১৫৩...")
-  if (!detectedCustomerName) {
-    const beforePhoneMatch = transcript.match(/([^\s,।]+(?:\s+[^\s,।]+)?)\s*(?:ফোন|মোবাইল|phone|mobile)/i);
-    if (beforePhoneMatch && beforePhoneMatch[1]) {
-      const rawName = beforePhoneMatch[1].trim();
-      const excluded = ['থেকে', 'যাব', 'যাবেন', 'আজ', 'কাল', 'সকাল', 'রাত', 'গাড়ি', 'ড্রাইভার', 'টাকা', 'যাত্রী', 'কাস্টমার'];
-      if (!excluded.includes(rawName.toLowerCase()) && rawName.length >= 2) {
-        detectedCustomerName = rawName;
-      }
-    }
-  }
+  // 1. Detect Universal Customer Name (Works with ANY novel or spoken name)
+  const detectedCustomerName = extractCustomerNameFromSpeech(transcript, driverMatch.name);
 
   // 2. Detect Pickup / From Location
   let detectedPickup: string | undefined;
@@ -434,7 +548,6 @@ export function parseBengaliVoiceCommand(
   
   if (pickupMatch && pickupMatch[1]) {
     let rawPick = pickupMatch[1].trim();
-    // Clean trailing keywords
     rawPick = rawPick.replace(/(?:আজ|কাল|সকাল|রাত|যাত্রী|কাস্টমার).*/i, '').trim();
     const excludedLocations = ['আজ', 'কাল', 'সকাল', 'রাত', 'দুপুর', 'বিকেল', 'এখানে', 'ওখান', 'গাড়ি', 'ড্রাইভার', 'ফোন', 'যাত্রী'];
     if (!excludedLocations.includes(rawPick.toLowerCase()) && rawPick.length >= 2) {
@@ -515,7 +628,6 @@ export function parseBengaliVoiceCommand(
   let detectedTime: string | undefined;
   const textWithAscii = convertBengaliDigitsToAscii(transcript);
   
-  // Look for: [সকাল/ভোর/দুপুর/বিকেল/সন্ধ্যা/রাত]? [hour]:[min]? [টা/টার/am/pm]
   const timePattern = /(?:(সকাল|ভোর|দুপুর|বিকেল|সন্ধ্যা|সন্ধা|রাত|morning|afternoon|evening|night)\s*)?(\d{1,2})(?::(\d{2}))?\s*(?:টা|টার|টায়|am|pm|baje)?/i;
   const timeMatch = textWithAscii.match(timePattern);
 
@@ -534,7 +646,6 @@ export function parseBengaliVoiceCommand(
       } else if (periodWord.includes('সকাল') || periodWord.includes('ভোর') || periodWord.includes('morning')) {
         detectedTime = `${String(hour).padStart(2, '0')}:${minute} AM`;
       } else {
-        // Default assumption: 6-11 is AM, 1-5 is PM if unspecified
         if (hour >= 6 && hour <= 11) {
           detectedTime = `${String(hour).padStart(2, '0')}:${minute} AM`;
         } else {
@@ -544,7 +655,7 @@ export function parseBengaliVoiceCommand(
     }
   }
 
-  // Fallback keyword time slots if no explicit hour was said
+  // Fallback keyword time slots
   if (!detectedTime) {
     if (clean.includes('ভোর') || clean.includes('early morning')) {
       detectedTime = '05:00 AM';
@@ -572,7 +683,7 @@ export function parseBengaliVoiceCommand(
     dateStr: detectedDate,
     timeSlot: detectedTime || '07:00 AM',
     tripType: (detectedDest?.includes('বিবাহ') || clean.includes('বিয়ে') || clean.includes('বিবাহ')) ? 'Wedding / Biyebari' : 'Local Day Trip',
-    notes: '', // Do NOT store raw transcript in notes, keep it clean
+    notes: '', // Keep notes field clean and empty for optional custom notes
     confidence: driverMatch.confidence || (detectedDest ? 0.85 : 0.5)
   };
 }
@@ -621,21 +732,21 @@ export function generateDriverWhatsAppDispatchSlip(params: {
 }
 
 /**
- * Initialize Speech Recognition instance with rock-solid error handling & iframe resilience
+ * Initialize Speech Recognition instance with rock-solid error handling, mobile audio permissions & multi-locale support
  */
 export function createBengaliSpeechRecognizer(
   onResult: (transcript: string, isFinal: boolean) => void,
   onError: (error: string) => void,
   onEnd: () => void,
   language: string = 'bn-IN'
-): { start: () => void; stop: () => void; isListening: () => boolean } {
+): { start: () => Promise<void>; stop: () => void; isListening: () => boolean } {
   const SpeechRecognitionClass = 
     (window as any).SpeechRecognition || 
     (window as any).webkitSpeechRecognition;
 
   if (!SpeechRecognitionClass) {
     return {
-      start: () => onError('আপনার ব্রাউজার সরাসরি মাইক্রোফোন রিকগনিশন সমর্থন করে না। আপনি নিচের রেডি ভয়েস টেমপ্লেট অথবা টেক্সট বক্সে লিখতে পারেন।'),
+      start: async () => onError('আপনার ব্রাউজার সরাসরি ভয়েস রিকগনিশন সমর্থন করে না। আপনি নিচের রেডি টেমপ্লেট অথবা কীবোর্ডের মাইক দিয়ে ইনপুট করতে পারেন।'),
       stop: () => {},
       isListening: () => false
     };
@@ -647,8 +758,8 @@ export function createBengaliSpeechRecognizer(
   const initRecognizer = () => {
     try {
       recognition = new SpeechRecognitionClass();
-      recognition.lang = language; // 'bn-IN' or 'en-IN'
-      recognition.continuous = false; // continuous = false avoids browser hanging on mobile/iframe
+      recognition.lang = language || 'bn-IN';
+      recognition.continuous = false; // continuous = false avoids hanging on mobile WebKit/Chrome
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
@@ -671,15 +782,15 @@ export function createBengaliSpeechRecognizer(
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error event:', event.error);
+        console.warn('Speech recognition event error:', event.error);
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          onError('মাইক্রোফোন অনুমতি দরকার। ব্রাউজার সেটিংসে মাইক অ্যালাউ করুন অথবা নিচের টেমপ্লেটে ক্লিক করে ট্রিপ যোগ করুন।');
+          onError('মাইক্রোফোন অনুমতি বন্ধ আছে। মোবাইলের ব্রাউজার সেটিংসে Microphone Allow করুন অথবা নিচের টেমপ্লেটে ক্লিক করুন।');
         } else if (event.error === 'no-speech') {
           // No speech detected, graceful
         } else if (event.error === 'network') {
-          onError('ইন্টারনেট সংযোগ যাচাই করুন অথবা নিচের রেডি টেমপ্লেটে ক্লিক করুন।');
+          onError('ইন্টারনেট সংযোগ চেক করুন অথবা নিচের রেডি টেমপ্লেট ব্যবহার করুন।');
         } else {
-          onError(`ভয়েস বার্তা (${event.error})। আপনি নিচের টেমপ্লেট বা টেক্সট বক্স ব্যবহার করতে পারেন।`);
+          onError(`ভয়েস রিকগনিশন বার্তা (${event.error})।`);
         }
       };
 
@@ -695,20 +806,26 @@ export function createBengaliSpeechRecognizer(
   initRecognizer();
 
   return {
-    start: () => {
+    start: async () => {
       try {
+        // Request microphone permission on mobile/desktop first
+        const perm = await requestMicrophonePermission();
+        if (!perm.granted && perm.error) {
+          onError(perm.error);
+          return;
+        }
+
         if (!recognition) initRecognizer();
         listening = true;
         recognition.start();
       } catch (err: any) {
         console.warn('Recognition start exception:', err);
-        // Try to re-initialize once
         try {
           initRecognizer();
           recognition.start();
           listening = true;
         } catch (e2) {
-          onError('মাইক্রোফোন চালু করা যায়নি। অনুগ্রহ করে মাইকে ক্লিক করে অনুমতি দিন।');
+          onError('মাইক্রোফোন চালু করা যায়নি। অনুগ্রহ করে মাইকে ট্যাপ করে মাইক্রোফোন অনুমতি দিন।');
         }
       }
     },
@@ -725,3 +842,4 @@ export function createBengaliSpeechRecognizer(
     isListening: () => listening
   };
 }
+

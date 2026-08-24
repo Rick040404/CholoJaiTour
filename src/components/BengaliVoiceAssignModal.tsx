@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Mic, MicOff, Sparkles, Check, X, Car, User, 
+  Mic, Sparkles, Check, X, Car, User, 
   Phone, Clock, AlertCircle, MessageSquare,
   MapPin, FileText, CheckCircle2,
-  Wand2
+  Wand2, Globe, Smartphone
 } from 'lucide-react';
 import { DriverProfile, BookingLead, Language, FleetCar } from '../types';
 import { 
@@ -11,6 +11,7 @@ import {
   parseBengaliVoiceCommand, 
   VoiceParsedResult,
   isSpeechRecognitionSupported,
+  isMobileDevice,
   POPULAR_LOCAL_DESTINATIONS,
   QUICK_VOICE_TEMPLATES,
   generateDriverWhatsAppDispatchSlip
@@ -51,7 +52,8 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
   const [, setParsedResult] = useState<VoiceParsedResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
-  const recognitionLang = 'bn-IN';
+  const [speechLang, setSpeechLang] = useState<'bn-IN' | 'en-IN'>('bn-IN');
+  const isMobile = isMobileDevice();
 
   // Dedicated Form fields populated directly from voice
   const [chosenCarId, setChosenCarId] = useState<string>(selectedCarId || cars[0]?.id || 'wagonr');
@@ -124,15 +126,15 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
     if (parsed.driverPhone) setDriverPhone(parsed.driverPhone);
 
     const extracted = [];
-    if (parsed.customerName) extracted.push(isBn ? `যাত্রী (${parsed.customerName})` : `Name (${parsed.customerName})`);
+    if (parsed.customerName) extracted.push(isBn ? `যাত্রী (${parsed.customerName})` : `Passenger (${parsed.customerName})`);
     if (parsed.customerPhone) extracted.push(isBn ? `ফোন (${parsed.customerPhone})` : `Phone (${parsed.customerPhone})`);
     if (parsed.pickup) extracted.push(isBn ? `পিকআপ (${parsed.pickup})` : `Pickup (${parsed.pickup})`);
-    if (parsed.destination) extracted.push(isBn ? `গন্তব্য (${parsed.destination})` : `Dest (${parsed.destination})`);
+    if (parsed.destination) extracted.push(isBn ? `গন্তব্য (${parsed.destination})` : `Destination (${parsed.destination})`);
     if (parsed.timeSlot) extracted.push(isBn ? `সময় (${parsed.timeSlot})` : `Time (${parsed.timeSlot})`);
     if (parsed.driverName) extracted.push(isBn ? `ড্রাইভার (${parsed.driverName})` : `Driver (${parsed.driverName})`);
 
     if (extracted.length > 0) {
-      setSuccessNotice(isBn ? `✓ তথ্য ফিল্ডে পূরণ হয়েছে: ${extracted.join(', ')}` : `✓ Auto-filled into fields: ${extracted.join(', ')}`);
+      setSuccessNotice(isBn ? `✓ ফিল্ডে পূরণ হয়েছে: ${extracted.join(', ')}` : `✓ Detected & filled: ${extracted.join(', ')}`);
     }
   };
 
@@ -151,16 +153,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
     applyParsedDataToState(parsed);
   };
 
-  const startListening = () => {
-    if (!isSupported) {
-      setErrorMsg(
-        isBn
-          ? 'আপনার ব্রাউজার সরাসরি মাইক্রোফোন এক্সেস ব্লক করেছে। আপনি নিচে টেক্সট লিখে "অটো-ফিল করুন" চাপতে পারেন অথবা রেডি টেমপ্লেটে ক্লিক করুন।'
-          : 'Speech recognition is blocked in this browser. Please type or click a template below.'
-      );
-      return;
-    }
-
+  const startListening = async () => {
     setErrorMsg(null);
     setSuccessNotice(null);
     setTranscript('');
@@ -188,11 +181,11 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
         () => {
           setIsListening(false);
         },
-        recognitionLang
+        speechLang
       );
 
       recognizerRef.current = recognizer;
-      recognizer.start();
+      await recognizer.start();
       setIsListening(true);
     } catch (err: any) {
       setErrorMsg(err.message || 'ভয়েস রিকগনিশন চালু করা যায়নি।');
@@ -279,7 +272,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
 
   return (
     <div className="fixed inset-0 z-70 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-xl w-full overflow-hidden shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 my-4 flex flex-col max-h-[92vh]">
+      <div className="bg-white rounded-3xl max-w-xl w-full overflow-hidden shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 my-4 flex flex-col max-h-[94vh]">
         
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-800 text-white p-4 sm:p-5 flex items-center justify-between shrink-0">
@@ -290,16 +283,16 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base sm:text-lg font-black tracking-tight">
-                  {isBn ? 'বাংলা ভয়েস ট্রিপ বুকিং ও অটো-ইনপুট' : 'Bengali Voice Trip Booking & Auto-Fill'}
+                  {isBn ? 'ভয়েস ট্রিপ বুকিং ও অটো-ইনপুট' : 'Voice Trip Booking & Auto-Fill'}
                 </h3>
                 <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase">
-                  Voice AI
+                  Mobile & Web
                 </span>
               </div>
               <p className="text-xs text-blue-100 font-medium">
                 {isBn
-                  ? 'মুখে বলুন: পিকআপ, গন্তব্য, যাত্রীর নাম, মোবাইল ও ড্রাইভারের নাম'
-                  : 'Speak pickup, destination, passenger name, mobile & driver'}
+                  ? 'মুখে বলুন: যাত্রীর নাম, মোবাইল নম্বর, পিকআপ ও গন্তব্য'
+                  : 'Speak passenger name, phone, pickup & destination'}
               </p>
             </div>
           </div>
@@ -315,6 +308,43 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
         {/* Modal Scrollable Body */}
         <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
           
+          {/* Language Selector Pill & Mobile Tip */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-100 border border-slate-200">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <Globe className="w-4 h-4 text-blue-600" />
+              <span>{isBn ? 'ভয়েস ভাষা:' : 'Voice Language:'}</span>
+              <button
+                type="button"
+                onClick={() => setSpeechLang('bn-IN')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  speechLang === 'bn-IN' 
+                    ? 'bg-blue-600 text-white shadow-2xs' 
+                    : 'bg-white text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                বাংলা (bn-IN)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSpeechLang('en-IN')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  speechLang === 'en-IN' 
+                    ? 'bg-blue-600 text-white shadow-2xs' 
+                    : 'bg-white text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                English (en-IN)
+              </button>
+            </div>
+
+            {isMobile && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
+                <Smartphone className="w-3 h-3 text-indigo-600" />
+                <span>মোবাইল প্রস্তুত</span>
+              </span>
+            )}
+          </div>
+
           {/* Quick Bengali Voice Templates (1-Tap Test & Dictate) */}
           <div className="space-y-1.5 bg-indigo-50/70 p-3 rounded-2xl border border-indigo-100">
             <div className="flex items-center justify-between">
@@ -356,7 +386,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
               <button
                 type="button"
                 onClick={isListening ? stopListening : startListening}
-                className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 cursor-pointer ${
+                className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 cursor-pointer touch-manipulation ${
                   isListening
                     ? 'bg-gradient-to-tr from-rose-600 to-red-500 text-white shadow-red-500/30 ring-4 ring-red-200'
                     : 'bg-gradient-to-tr from-blue-600 to-indigo-600 text-white shadow-indigo-500/30 hover:brightness-110'
@@ -377,10 +407,15 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
                   : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
               }`}>
                 {isListening 
-                  ? (isBn ? '🎙️ শুনছি... স্পষ্ট করে কথা বলুন' : '🎙️ Listening... Speak now') 
+                  ? (isBn ? '🎙️ শুনছি... স্পষ্ট করে মুখে বলুন' : '🎙️ Listening... Speak now') 
                   : (isBn ? '👉 মাইকে ট্যাপ করে মুখে বলুন' : '👉 Tap Mic to start speaking')}
               </span>
             </div>
+
+            {/* Mobile Helpful Hint */}
+            <p className="text-[11px] text-slate-500 mt-2 font-medium">
+              💡 {isBn ? 'মোবাইলে মাইকে ট্যাপ করলে পারমিশন চাইলে "Allow" করুন। অথবা কীবোর্ডের মাইক দিয়েও লিখতে পারেন।' : 'On mobile, tap Allow for microphone access, or use your keyboard microphone.'}
+            </p>
           </div>
 
           {/* Real-time Spoken Transcript & Manual Text Input Area */}
@@ -394,9 +429,15 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
               <input
                 type="text"
                 value={customVoiceInput}
-                onChange={(e) => setCustomVoiceInput(e.target.value)}
+                onChange={(e) => {
+                  setCustomVoiceInput(e.target.value);
+                  if (e.target.value.length > 5) {
+                    const parsed = parseBengaliVoiceCommand(e.target.value, drivers, cars);
+                    applyParsedDataToState(parsed);
+                  }
+                }}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleManualParse(); }}
-                placeholder={isBn ? 'যেমন: জামালপুর থেকে বর্ধমান সকাল ৭ টায়, যাত্রী বিকাশ ফোন ৯১৫৩৩০২৫১৭...' : 'Type or paste Bengali booking speech here...'}
+                placeholder={isBn ? 'যেমন: যাত্রী রতন দাস ফোন ৯১৫৩৩০২৫১৭ জামালপুর থেকে বর্ধমান...' : 'Type or speak: passenger name, phone, pickup, destination...'}
                 className="flex-1 bg-slate-800 text-white font-sans text-xs px-3 py-2 rounded-xl border border-slate-700 outline-none focus:border-indigo-400"
               />
               <button
@@ -455,7 +496,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
                   type="text"
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="যেমন: বিকাশ ঘোষ / অমল বাবু"
+                  placeholder={isBn ? 'যেমন: বিকাশ ঘোষ / অমল বাবু / যে কোনো নাম' : 'e.g. Rahul Sen / Amit Mondal'}
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-slate-50/50 text-xs font-bold text-slate-900 outline-none focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                 />
               </div>
@@ -682,3 +723,4 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
     </div>
   );
 };
+

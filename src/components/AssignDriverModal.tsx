@@ -1,12 +1,17 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   X, Car, Phone, MessageSquare, Send, CheckCircle2, 
   User, UserPlus, AlertCircle, ArrowRight, Calendar, 
-  MapPin, Clock, DollarSign, Check
+  MapPin, Clock, DollarSign, Check, Mic, MicOff, Sparkles
 } from 'lucide-react';
 import { BookingLead, DriverProfile, Language } from '../types';
 import { syncUpdateBooking, syncSaveDriver } from '../utils/syncService';
 import { formatFullBengaliDate } from '../utils/bengaliCalendar';
+import { 
+  createBengaliSpeechRecognizer, 
+  parseBengaliVoiceCommand, 
+  isSpeechRecognitionSupported 
+} from '../utils/voiceRecognition';
 
 interface AssignDriverModalProps {
   isOpen: boolean;
@@ -35,6 +40,65 @@ export const AssignDriverModal: React.FC<AssignDriverModalProps> = ({
   const [saveToDirectory, setSaveToDirectory] = useState<boolean>(true);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Bengali Voice Recognition
+  const [isListening, setIsListening] = useState<boolean>(false);
+  const [voiceTranscript, setVoiceTranscript] = useState<string>('');
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const recognizerRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (recognizerRef.current) {
+        recognizerRef.current.stop();
+      }
+    };
+  }, []);
+
+  const handleToggleVoice = () => {
+    if (isListening) {
+      if (recognizerRef.current) recognizerRef.current.stop();
+      setIsListening(false);
+      return;
+    }
+
+    if (!isSpeechRecognitionSupported()) {
+      setError(isBn ? 'আপনার ব্রাউজারে ভয়েস রিকগনিশন সমর্থন করে না।' : 'Voice recognition not supported.');
+      return;
+    }
+
+    setVoiceNotice(isBn ? 'শুনছি... ড্রাইভারের নাম বলুন...' : 'Listening... speak driver name...');
+    setVoiceTranscript('');
+    setError(null);
+
+    try {
+      const recognizer = createBengaliSpeechRecognizer(
+        (text, isFinal) => {
+          setVoiceTranscript(text);
+          const parsed = parseBengaliVoiceCommand(text, drivers);
+          if (parsed.driverName) {
+            setDriverNameInput(parsed.driverName);
+            if (parsed.driverPhone) setDriverPhoneInput(parsed.driverPhone);
+            if (parsed.matchedDriver) setSelectedDriverId(parsed.matchedDriver.id);
+            setVoiceNotice(isBn ? `✓ ড্রাইভার ${parsed.driverName} শনাক্ত হয়েছে!` : `✓ Driver ${parsed.driverName} matched!`);
+          }
+        },
+        (err) => {
+          setVoiceNotice(err);
+          setIsListening(false);
+        },
+        () => {
+          setIsListening(false);
+        }
+      );
+      recognizerRef.current = recognizer;
+      recognizer.start();
+      setIsListening(true);
+    } catch (e: any) {
+      setError(e.message);
+      setIsListening(false);
+    }
+  };
 
   // Sync state when booking changes
   React.useEffect(() => {
@@ -272,6 +336,39 @@ export const AssignDriverModal: React.FC<AssignDriverModalProps> = ({
           {/* Custom Driver Name & Phone Input Form */}
           <form onSubmit={handleAssignAndSendWhatsApp} className="space-y-3 pt-2">
             
+            {/* Bengali Voice Assistant Strip */}
+            <div className="bg-indigo-50/80 border border-indigo-200 p-2.5 rounded-2xl flex items-center justify-between gap-2 shadow-2xs">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleToggleVoice}
+                  className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+                    isListening
+                      ? 'bg-rose-600 text-white animate-bounce shadow-md shadow-rose-500/30'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
+                  }`}
+                  title={isBn ? 'বাংলা ভয়েস দিয়ে ড্রাইভারের নাম বলুন' : 'Speak driver name in Bengali'}
+                >
+                  {isListening ? <Mic className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+                <div>
+                  <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1">
+                    {isBn ? 'বাংলা ভয়েস রিকগনিশন' : 'Bengali Voice Input'}
+                    <span className="text-[9px] font-black bg-indigo-200 text-indigo-900 px-1 rounded">BN</span>
+                  </span>
+                  <p className="text-[10px] text-slate-600">
+                    {voiceNotice || (isBn ? 'মাইকে চাপ দিয়ে ড্রাইভারের নাম বলুন (উদাঃ "ড্রাইভার রাজু")' : 'Tap mic and speak driver name in Bengali')}
+                  </p>
+                </div>
+              </div>
+
+              {voiceTranscript && (
+                <span className="text-[10px] font-mono font-bold bg-white px-2 py-0.5 rounded-lg border border-indigo-200 text-indigo-900 truncate max-w-[120px]">
+                  "{voiceTranscript}"
+                </span>
+              )}
+            </div>
+
             {error && (
               <div className="p-2.5 rounded-xl bg-rose-50 text-rose-800 border border-rose-200 text-xs font-bold flex items-center gap-1.5">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />

@@ -5,7 +5,8 @@ import {
   Sparkles, Megaphone, Save, LogOut, ChevronRight, Eye, EyeOff, RefreshCw,
   MapPin, Check, ChevronDown, User, Tag, Search, Filter, Share2, Copy,
   ArrowRight, DollarSign, CalendarDays, Key, Shield, Navigation, Receipt, FileText, Send, Users,
-  Bell, BellRing, CheckCheck, ShieldAlert, KeyRound, History, Unlock, AlertTriangle, Timer, Smartphone
+  Bell, BellRing, CheckCheck, ShieldAlert, KeyRound, History, Unlock, AlertTriangle, Timer, Smartphone,
+  Mic, UserCheck
 } from 'lucide-react';
 import { FLEET_CARS, BUSINESS_INFO } from '../data/fleetData';
 import { FleetCar, Language, CRMCustomerProfile, DriverProfile } from '../types';
@@ -53,6 +54,15 @@ import { InvoiceGenerator } from './InvoiceGenerator';
 import { CRMManager } from './CRMManager';
 import { DriverManagerModal } from './DriverManagerModal';
 import { AssignDriverModal } from './AssignDriverModal';
+import { LocalTripBookingModal } from './LocalTripBookingModal';
+import { BengaliVoiceAssignModal } from './BengaliVoiceAssignModal';
+import { 
+  createBengaliSpeechRecognizer, 
+  parseBengaliVoiceCommand, 
+  isSpeechRecognitionSupported,
+  POPULAR_LOCAL_DESTINATIONS,
+  generateDriverWhatsAppDispatchSlip
+} from '../utils/voiceRecognition';
 
 export interface BookingLead {
   id: string;
@@ -231,6 +241,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   const [showDriversModal, setShowDriversModal] = useState<boolean>(false);
   const [assignDriverBooking, setAssignDriverBooking] = useState<BookingLead | null>(null);
+
+  // 4-Day Matrix Local Trip & Voice Dispatch States
+  const [showLocalTripModal, setShowLocalTripModal] = useState<boolean>(false);
+  const [localTripSelectedCarId, setLocalTripSelectedCarId] = useState<string | undefined>(undefined);
+  const [localTripSelectedDateStr, setLocalTripSelectedDateStr] = useState<string | undefined>(undefined);
+
+  const [showVoiceAssignModal, setShowVoiceAssignModal] = useState<boolean>(false);
+  const [voiceAssignTargetBooking, setVoiceAssignTargetBooking] = useState<BookingLead | null>(null);
+  const [voiceAssignTargetCarId, setVoiceAssignTargetCarId] = useState<string | null>(null);
+  const [voiceAssignTargetDateStr, setVoiceAssignTargetDateStr] = useState<string | null>(null);
 
   const handleOpenInvoiceForBooking = (b: BookingLead) => {
     setSelectedBookingForInvoice(b);
@@ -502,6 +522,125 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     // Cloud sync to other devices
     syncSaveSchedule(scheduleFormData);
     setScheduleModalOpen(false);
+  };
+
+  // Open Local Trip Booking Modal
+  const handleOpenLocalTripModal = (carId?: string, dateStr?: string) => {
+    setLocalTripSelectedCarId(carId || cars[0]?.id);
+    setLocalTripSelectedDateStr(dateStr || currentActiveDay.dateStr);
+    setShowLocalTripModal(true);
+  };
+
+  // Handle Save from LocalTripBookingModal
+  const handleSaveLocalTripBooking = (newBooking: BookingLead, scheduleData: CarDaySchedule) => {
+    // 1. Save to bookings list and cloud
+    setBookings(prev => [newBooking, ...prev]);
+    syncSaveBooking(newBooking);
+
+    // 2. Save to 4-day matrix schedule and cloud
+    setScheduleBookings(prev => {
+      const filtered = prev.filter(s => !(s.carId === scheduleData.carId && s.dateStr === scheduleData.dateStr));
+      return [...filtered, scheduleData];
+    });
+    syncSaveSchedule(scheduleData);
+
+    // 3. If driver assigned and has phone, option to prompt WhatsApp
+    if (scheduleData.driverPhone) {
+      setAssignDriverBooking(newBooking);
+    }
+  };
+
+  // Open Bengali Voice Assign Modal
+  const handleOpenVoiceAssign = (booking?: BookingLead | null, carId?: string, dateStr?: string) => {
+    setVoiceAssignTargetBooking(booking || null);
+    setVoiceAssignTargetCarId(carId || null);
+    setVoiceAssignTargetDateStr(dateStr || currentActiveDay.dateStr);
+    setShowVoiceAssignModal(true);
+  };
+
+  // Handle Save from Bengali Voice Modal (full trip: from, to, time, passenger name, phone, driver, fare, notes)
+  const handleSaveVoiceTripBooking = (
+    newBooking: BookingLead,
+    assignedDriverName?: string,
+    assignedDriverPhone?: string
+  ) => {
+    // 1. Save to bookings list and cloud
+    setBookings(prev => [newBooking, ...prev]);
+    syncSaveBooking(newBooking);
+
+    // 2. Find matching car or first car to update in matrix
+    const matchedCar = cars.find(c => c.name === newBooking.car || newBooking.car.includes(c.name) || newBooking.car.includes(c.id)) || cars[0];
+    const targetDate = newBooking.date || currentActiveDay.dateStr;
+
+    const scheduleData: CarDaySchedule = {
+      carId: matchedCar.id,
+      dateStr: targetDate,
+      status: assignedDriverName ? 'Driver Assigned' : 'Booked',
+      customerName: newBooking.name,
+      customerPhone: newBooking.phone,
+      pickup: newBooking.pickup,
+      destination: newBooking.destination,
+      timeSlot: newBooking.timeSlot || '07:00 AM',
+      fareEstimate: newBooking.fareEstimate || '1200',
+      driverName: assignedDriverName,
+      driverPhone: assignedDriverPhone,
+      notes: newBooking.notes || ''
+    };
+
+    setScheduleBookings(prev => {
+      const filtered = prev.filter(s => !(s.carId === matchedCar.id && s.dateStr === targetDate));
+      return [...filtered, scheduleData];
+    });
+    syncSaveSchedule(scheduleData);
+
+    // 3. If driver assigned, prompt WhatsApp dispatch
+    if (assignedDriverName && assignedDriverPhone) {
+      setAssignDriverBooking(newBooking);
+    }
+  };
+
+  // Direct WhatsApp Trip Dispatch to Driver from 4-Day Matrix
+  const handleSendWhatsAppDispatchToDriver = (schedule: CarDaySchedule, car: FleetCar) => {
+    const carDisplay = `${car.seats} • ${car.category} (${car.acType})`;
+    const msg = generateDriverWhatsAppDispatchSlip({
+      dateFormatted: `${currentActiveDay.weekdayFull}, ${currentActiveDay.dayNum} ${currentActiveDay.monthShort} (বাংলা: ${currentActiveDay.bengaliDate.dayBn} ${currentActiveDay.bengaliDate.monthBn})`,
+      timeSlot: schedule.timeSlot || '07:00 AM',
+      customerName: schedule.customerName || 'সম্মানিত যাত্রী',
+      customerPhone: schedule.customerPhone || '9153302517',
+      pickup: schedule.pickup || 'জামালপুর',
+      destination: schedule.destination || 'বর্ধমান স্টেশন',
+      vehicleCategory: carDisplay,
+      driverName: schedule.driverName,
+      notes: schedule.notes
+    });
+
+    const targetPhone = schedule.driverPhone ? schedule.driverPhone.replace(/\D/g, '') : '9153302517';
+    const cleanNumber = targetPhone.length === 10 ? `91${targetPhone}` : targetPhone;
+    const whatsappUrl = `https://wa.me/${cleanNumber}?text=${encodeURIComponent(msg)}`;
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  // Clear / Cancel a car booking on specific date in 4-Day Matrix
+  const handleClearCarSchedule = (carId: string, dateStr: string) => {
+    const clearedSchedule: CarDaySchedule = {
+      carId,
+      dateStr,
+      status: 'Available',
+      customerName: '',
+      customerPhone: '',
+      pickup: '',
+      destination: '',
+      timeSlot: '07:00 AM',
+      fareEstimate: '',
+      driverName: '',
+      driverPhone: '',
+      notes: ''
+    };
+    setScheduleBookings(prev => {
+      const filtered = prev.filter(s => !(s.carId === carId && s.dateStr === dateStr));
+      return [...filtered, clearedSchedule];
+    });
+    syncSaveSchedule(clearedSchedule);
   };
 
   // Comprehensive Bookings Lead state (starts clean / loaded from localStorage)
@@ -1269,280 +1408,369 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             {/* Scrollable Tab Content View */}
             <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-slate-50/50">
 
-              {/* TAB 1: 4-DAY DISPATCH MATRIX WITH BENGALI CALENDAR DATES */}
-              {activeTab === 'overview' && (
-                <div className="space-y-6">
-                  
-                  {/* Top 4-Day Selector Bar */}
-                  <div className="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200 shadow-sm">
-                    <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-                      <div className="flex items-center gap-2">
-                        <CalendarDays className="w-4 h-4 text-blue-600" />
-                        <span className="text-xs sm:text-sm font-extrabold text-slate-800">
-                          {isBn ? '৪ দিনের বুকিং ক্যালেন্ডার ও গাড়ি বরাদ্দ' : '4-Day Booking & Dispatch Selector'}
-                        </span>
+              {/* TAB 1: 4-DAY DISPATCH MATRIX - SIMPLE & CLEAN TRIP SCHEDULE (NO CAR GRID) */}
+              {activeTab === 'overview' && (() => {
+                // Active Day Scheduled Trips
+                const activeSchedules = scheduleBookings.filter(s => s.dateStr === currentActiveDay.dateStr && Boolean(s.customerName || s.destination || s.driverName));
+                const activeLeads = bookings.filter(b => b.date === currentActiveDay.dateStr);
+
+                // Consolidated trips list
+                const dayTrips = [
+                  ...activeSchedules.map(s => {
+                    const carObj = cars.find(c => c.id === s.carId);
+                    return {
+                      id: `sched-${s.carId}-${s.dateStr}`,
+                      type: 'schedule' as const,
+                      carId: s.carId,
+                      carName: carObj?.name || 'Cab / Car',
+                      customerName: s.customerName || '',
+                      customerPhone: s.customerPhone || '',
+                      pickup: s.pickup || 'জামালপুর',
+                      destination: s.destination || 'বর্ধমান স্টেশন',
+                      timeSlot: s.timeSlot || '07:00 AM',
+                      fareEstimate: s.fareEstimate || '1200',
+                      driverName: s.driverName || '',
+                      driverPhone: s.driverPhone || '',
+                      notes: s.notes || '',
+                      status: s.status || 'Booked',
+                      rawSchedule: s
+                    };
+                  }),
+                  ...activeLeads
+                    .filter(b => !activeSchedules.some(s => s.customerPhone && b.phone && s.customerPhone.replace(/\D/g, '') === b.phone.replace(/\D/g, '')))
+                    .map(b => ({
+                      id: `lead-${b.id}`,
+                      type: 'lead' as const,
+                      carId: b.car,
+                      carName: b.car,
+                      customerName: b.name,
+                      customerPhone: b.phone,
+                      pickup: b.pickup,
+                      destination: b.destination,
+                      timeSlot: b.timeSlot || '07:00 AM',
+                      fareEstimate: b.fareEstimate || '1200',
+                      driverName: b.driverName || '',
+                      driverPhone: b.driverPhone || '',
+                      notes: b.notes || '',
+                      status: b.status || 'Confirmed',
+                      rawLead: b
+                    }))
+                ];
+
+                return (
+                  <div className="space-y-4">
+                    {/* Top Simple Header & Fast Trip Actions */}
+                    <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
+                          <CalendarDays className="w-4 h-4 text-blue-600" />
+                          <span>{isBn ? '৪ দিনের ট্রিপ শিডিউল ও ডেসপ্যাচ' : '4-Day Trip Schedule & Dispatch'}</span>
+                        </h3>
+                        <p className="text-xs text-slate-500 font-medium mt-0.5">
+                          {isBn ? 'তারিখ নির্বাচন করে ট্রিপ বুক করুন ও ড্রাইভারকে সরাসরি হোয়াটসঅ্যাপে ডেসপ্যাচ পাঠান' : 'Select date to view trips, book voice trips or dispatch to drivers via WhatsApp'}
+                        </p>
                       </div>
-                      <span className="text-[11px] text-slate-500 font-medium">
-                        {isBn ? 'যেকোনো দিনে ক্লিক করে গাড়ির শিডিউল পরিবর্তন করুন' : 'Click a date tab to inspect or assign cars'}
-                      </span>
+
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {/* Bengali Voice Booking Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenVoiceAssign(null, undefined, currentActiveDay.dateStr)}
+                          className="py-2 px-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-black shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                        >
+                          <Mic className="w-4 h-4 text-amber-300 animate-pulse" />
+                          <span>{isBn ? 'ভয়েসে ট্রিপ বুক করুন' : 'Voice Book Trip'}</span>
+                        </button>
+
+                        {/* Manual / Card Trip Booking Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenLocalTripModal(undefined, currentActiveDay.dateStr)}
+                          className="py-2 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>{isBn ? '+ নতুন ট্রিপ যোগ করুন' : '+ Add New Trip'}</span>
+                        </button>
+                      </div>
                     </div>
 
-                    {/* 4 Day Tabs with Bengali & English Date info */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+                    {/* 4 Simple Date Tabs */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       {upcoming4Days.map((day) => {
                         const isSelected = selectedDayOffset === day.offset;
-                        // Count statuses for this day
-                        const daySchedules = scheduleBookings.filter(s => s.dateStr === day.dateStr);
-                        const bookedCount = daySchedules.filter(s => s.status === 'Booked' || s.status === 'Driver Assigned').length;
-                        const availableCount = cars.length - bookedCount - daySchedules.filter(s => s.status === 'In Service').length;
+                        const schedCount = scheduleBookings.filter(s => s.dateStr === day.dateStr && Boolean(s.customerName || s.destination || s.driverName)).length;
+                        const leadCount = bookings.filter(b => b.date === day.dateStr).length;
+                        const tripCount = Math.max(schedCount, leadCount);
 
                         return (
                           <button
                             key={day.offset}
                             onClick={() => setSelectedDayOffset(day.offset)}
-                            className={`p-3 rounded-2xl border text-left transition-all relative overflow-hidden flex flex-col justify-between ${
+                            className={`p-3 rounded-2xl text-left transition-all border cursor-pointer flex flex-col justify-between ${
                               isSelected
-                                ? 'bg-gradient-to-br from-blue-700 via-indigo-700 to-purple-800 text-white border-blue-600 shadow-md scale-[1.02]'
-                                : 'bg-slate-50/80 hover:bg-slate-100/80 border-slate-200 text-slate-800'
+                                ? 'bg-slate-900 text-white border-slate-900 shadow-md ring-2 ring-blue-500/30'
+                                : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800'
                             }`}
                           >
-                            <div>
-                              <div className="flex items-center justify-between gap-1 mb-1">
-                                <span className={`text-xs font-black uppercase tracking-wider ${isSelected ? 'text-amber-300' : 'text-blue-600'}`}>
-                                  {isBn ? day.labelBn : day.labelEn}
-                                </span>
-                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                                  isSelected ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
-                                }`}>
-                                  {day.weekdayShortEn || day.weekdayEn}
-                                </span>
-                              </div>
-
-                              <p className={`text-sm sm:text-base font-black ${isSelected ? 'text-white' : 'text-slate-900'}`}>
-                                {day.dayNum} {day.monthShort}
-                              </p>
-
-                              {/* Bengali Date Badge inside tab */}
-                              <p className={`text-[11px] font-bold mt-0.5 truncate ${isSelected ? 'text-amber-200 font-bengali' : 'text-indigo-600 font-bengali'}`}>
-                                {day.bengaliDate.dayBn} {day.bengaliDate.monthBn}, {day.bengaliDate.yearBn}
-                              </p>
+                            <div className="flex items-center justify-between gap-1 mb-1">
+                              <span className={`text-[11px] font-black uppercase tracking-wider ${isSelected ? 'text-amber-300' : 'text-blue-600'}`}>
+                                {isBn ? day.labelBn : day.labelEn}
+                              </span>
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                isSelected ? 'bg-white/20 text-slate-100' : 'bg-slate-100 text-slate-600'
+                              }`}>
+                                {day.weekdayShortEn || day.weekdayEn}
+                              </span>
                             </div>
 
-                            <div className="mt-2 pt-2 border-t border-white/15 flex items-center justify-between text-[10px] font-bold">
-                              <span className={isSelected ? 'text-emerald-300' : 'text-emerald-700'}>
-                                ✓ {availableCount} {isBn ? 'খালি' : 'Avail'}
+                            <p className="text-sm font-black">
+                              {day.dayNum} {day.monthShort}
+                            </p>
+
+                            <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-slate-200/40 text-[10px] font-semibold">
+                              <span className={isSelected ? 'text-slate-300' : 'text-slate-500 font-bengali'}>
+                                {day.bengaliDate.dayBn} {day.bengaliDate.monthBn}
                               </span>
-                              {bookedCount > 0 && (
-                                <span className={isSelected ? 'text-amber-300' : 'text-amber-700'}>
-                                  ● {bookedCount} {isBn ? 'বুক' : 'Booked'}
-                                </span>
-                              )}
+                              <span className={`font-black px-1.5 py-0.5 rounded text-[10px] ${
+                                tripCount > 0 
+                                  ? (isSelected ? 'bg-amber-400 text-slate-950' : 'bg-indigo-100 text-indigo-800')
+                                  : (isSelected ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-100 text-slate-500')
+                              }`}>
+                                {tripCount > 0 ? `${toBengaliNumber(tripCount)} ট্রিপ` : (isBn ? 'ফাঁকা' : 'Free')}
+                              </span>
                             </div>
                           </button>
                         );
                       })}
                     </div>
-                  </div>
 
-                  {/* Day Detail Header Banner */}
-                  <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 p-4 rounded-2xl border border-indigo-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-                    <div>
+                    {/* Active Day Detail Banner */}
+                    <div className="flex items-center justify-between px-3.5 py-2.5 bg-slate-100 rounded-xl border border-slate-200 text-xs font-bold text-slate-800">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="px-2.5 py-0.5 rounded-full bg-blue-600 text-white text-xs font-black">
-                          {isBn ? currentActiveDay.labelBn : currentActiveDay.labelEn}
-                        </span>
-                        <h4 className="text-base sm:text-lg font-black text-slate-900">
+                        <span className="w-2.5 h-2.5 rounded-full bg-blue-600" />
+                        <span className="font-black text-slate-900">
                           {currentActiveDay.weekdayFull}, {currentActiveDay.dayNum} {currentActiveDay.monthShort} {currentActiveDay.date.getFullYear()}
-                        </h4>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1">
-                        <Calendar className="w-4 h-4 text-purple-600 shrink-0" />
-                        <span className="text-xs sm:text-sm font-extrabold text-purple-950 font-bengali">
-                          বাংলা তারিখ: {currentActiveDay.bengaliDate.formattedBn}
+                        </span>
+                        <span className="text-slate-600 font-bengali font-normal">
+                          (বাংলা: {currentActiveDay.bengaliDate.formattedBn})
                         </span>
                       </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 self-start sm:self-auto">
-                      <span className="text-xs text-slate-500 font-medium hidden md:inline">
-                        {isBn ? 'স্ট্যাটাস বদলাতে বাটনে চাপুন:' : 'Toggle status in 1 click:'}
+                      <span className="text-[11px] font-black text-slate-700 bg-white px-2.5 py-1 rounded-lg border border-slate-200 shadow-2xs">
+                        {isBn ? `মোট ট্রিপ: ${toBengaliNumber(dayTrips.length)} টি` : `Total Trips: ${dayTrips.length}`}
                       </span>
-                      <div className="flex items-center gap-1 text-[11px] font-bold">
-                        <span className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 border border-emerald-300">
-                          {isBn ? 'প্রস্তুত' : 'Avail'}
-                        </span>
-                        <span className="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 border border-amber-300">
-                          {isBn ? 'বুকড' : 'Booked'}
-                        </span>
-                        <span className="px-2 py-1 rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-300">
-                          {isBn ? 'ড্রাইভার' : 'Driver'}
-                        </span>
-                      </div>
                     </div>
-                  </div>
 
-                  {/* 6 Cars Matrix Grid for Current Selected Day */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {cars.map((car) => {
-                      const schedule = getCarSchedule(car.id, currentActiveDay.dateStr);
-                      const isAvailable = schedule.status === 'Available';
-                      const isBooked = schedule.status === 'Booked';
-                      const isDriverAssigned = schedule.status === 'Driver Assigned';
-                      const isInService = schedule.status === 'In Service';
+                    {/* Trip Schedule Cards Grid (No Cars) */}
+                    {dayTrips.length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {dayTrips.map((trip) => {
+                          const isAssigned = Boolean(trip.driverName);
 
-                      return (
-                        <div
-                          key={car.id}
-                          className={`bg-white rounded-2xl border transition-all shadow-xs overflow-hidden flex flex-col justify-between ${
-                            isAvailable
-                              ? 'border-emerald-200 hover:border-emerald-400'
-                              : isBooked
-                              ? 'border-amber-300 bg-amber-50/20'
-                              : isDriverAssigned
-                              ? 'border-indigo-300 bg-indigo-50/20'
-                              : 'border-slate-300 bg-slate-100/50'
-                          }`}
-                        >
-                          <div>
-                            {/* Car Card Header with Image & Title */}
-                            <div className="p-4 border-b border-slate-100 flex items-start gap-3">
-                              <img
-                                src={car.image}
-                                alt={car.name}
-                                className="w-16 h-12 object-cover rounded-xl border border-slate-200 shadow-2xs shrink-0"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center justify-between gap-1">
-                                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">
-                                    {car.seats}
+                          return (
+                            <div
+                              key={trip.id}
+                              className="bg-white rounded-2xl border border-slate-200 hover:border-slate-300 shadow-xs overflow-hidden flex flex-col justify-between transition-all"
+                            >
+                              {/* Trip Header */}
+                              <div className="p-3.5 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-black shrink-0">
+                                    <User className="w-4 h-4" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <h4 className="text-xs sm:text-sm font-black text-slate-900 truncate">
+                                      {trip.customerName || (isBn ? 'সম্মানিত যাত্রী' : 'Passenger')}
+                                    </h4>
+                                    {trip.customerPhone && (
+                                      <div className="flex items-center gap-2 text-[11px] mt-0.5">
+                                        <a
+                                          href={`tel:${trip.customerPhone}`}
+                                          className="text-blue-600 font-bold hover:underline"
+                                        >
+                                          {trip.customerPhone}
+                                        </a>
+                                        <a
+                                          href={`https://wa.me/91${trip.customerPhone.replace(/\D/g, '')}`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-emerald-600 hover:text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded text-[10px] font-bold border border-emerald-200"
+                                        >
+                                          WhatsApp
+                                        </a>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black shrink-0 ${
+                                  isAssigned 
+                                    ? 'bg-purple-100 text-purple-800 border border-purple-200' 
+                                    : 'bg-blue-100 text-blue-800 border border-blue-200'
+                                }`}>
+                                  {isAssigned ? (isBn ? '🟣 ড্রাইভার বরাদ্দ' : 'Dispatched') : (isBn ? '🔵 বুকড' : 'Booked')}
+                                </span>
+                              </div>
+
+                              {/* Trip Route & Times */}
+                              <div className="p-3.5 space-y-2 text-xs flex-1">
+                                {/* Route */}
+                                <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                                  <span className="text-[10px] text-slate-500 font-bold block mb-1">
+                                    {isBn ? 'রুট (পিকআপ ➔ গন্তব্য):' : 'Route:'}
                                   </span>
-                                  {/* Status Badge */}
-                                  <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${
-                                    isAvailable
-                                      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-                                      : isBooked
-                                      ? 'bg-amber-100 text-amber-800 border-amber-300'
-                                      : isDriverAssigned
-                                      ? 'bg-indigo-100 text-indigo-800 border-indigo-300'
-                                      : 'bg-slate-200 text-slate-700 border-slate-300'
-                                  }`}>
-                                    {isAvailable ? (isBn ? '● প্রস্তুত (খালি)' : '● Available') :
-                                     isBooked ? (isBn ? '● বুকিং কনফার্ম' : '● Booked') :
-                                     isDriverAssigned ? (isBn ? '● ড্রাইভার রেডি' : '● Assigned') :
-                                     (isBn ? '● গ্যারেজে' : '● In Service')}
+                                  <div className="flex items-center gap-1.5 font-bold text-slate-900 text-xs">
+                                    <span className="truncate">{trip.pickup || 'জামালপুর'}</span>
+                                    <ArrowRight className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                                    <span className="text-indigo-900 font-black truncate">{trip.destination || 'বর্ধমান'}</span>
+                                  </div>
+                                </div>
+
+                                {/* Time Slot & Fare */}
+                                <div className="flex items-center justify-between p-2 rounded-xl bg-indigo-50/50 border border-indigo-100 text-[11px]">
+                                  <div className="flex items-center gap-1 font-bold text-slate-700">
+                                    <Clock className="w-3.5 h-3.5 text-amber-600" />
+                                    <span>{trip.timeSlot || '07:00 AM'}</span>
+                                  </div>
+                                  <div className="font-black text-emerald-700">
+                                    ভাড়া: ₹{trip.fareEstimate || '1200'}
+                                  </div>
+                                </div>
+
+                                {/* Assigned Driver */}
+                                <div className="flex items-center justify-between p-2 rounded-xl bg-purple-50/50 border border-purple-100 text-[11px]">
+                                  <span className="text-slate-600 font-medium">{isBn ? 'ড্রাইভার:' : 'Driver:'}</span>
+                                  <span className={`font-bold ${isAssigned ? 'text-purple-900 font-black' : 'text-amber-700 font-semibold'}`}>
+                                    {isAssigned ? `${trip.driverName} ${trip.driverPhone ? `(${trip.driverPhone})` : ''}` : (isBn ? 'ড্রাইভার বাকি' : 'Unassigned')}
                                   </span>
                                 </div>
 
-                                <h5 className="text-sm font-black text-slate-900 mt-1 truncate">
-                                  {isBn ? car.nameBn : car.name}
-                                </h5>
-                                <p className="text-[11px] text-slate-500 font-medium truncate">
-                                  {car.acType} • {car.category}
-                                </p>
+                                {/* Notes if any */}
+                                {trip.notes && (
+                                  <p className="text-[10px] text-slate-500 italic bg-white p-1.5 rounded-lg border border-slate-200">
+                                    {trip.notes}
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* Card Action Footer */}
+                              <div className="p-3 bg-slate-50 border-t border-slate-100 space-y-2">
+                                {/* WhatsApp Slip to Driver */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const msg = generateDriverWhatsAppDispatchSlip({
+                                      dateFormatted: `${currentActiveDay.weekdayFull}, ${currentActiveDay.dayNum} ${currentActiveDay.monthShort} (বাংলা: ${currentActiveDay.bengaliDate.dayBn} ${currentActiveDay.bengaliDate.monthBn})`,
+                                      timeSlot: trip.timeSlot || '07:00 AM',
+                                      customerName: trip.customerName || 'সম্মানিত যাত্রী',
+                                      customerPhone: trip.customerPhone || '9153302517',
+                                      pickup: trip.pickup || 'জামালপুর',
+                                      destination: trip.destination || 'বর্ধমান স্টেশন',
+                                      vehicleCategory: 'Car / Cab',
+                                      driverName: trip.driverName,
+                                      notes: trip.notes
+                                    });
+                                    const targetPhone = trip.driverPhone ? trip.driverPhone.replace(/\D/g, '') : '9153302517';
+                                    const cleanNumber = targetPhone.length === 10 ? `91${targetPhone}` : targetPhone;
+                                    const whatsappUrl = `https://wa.me/${cleanNumber}?text=${encodeURIComponent(msg)}`;
+                                    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+                                  }}
+                                  className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 shadow-2xs active:scale-98 cursor-pointer"
+                                >
+                                  <MessageSquare className="w-3.5 h-3.5 fill-current" />
+                                  <span>{isBn ? 'ড্রাইভারকে হোয়াটসঅ্যাপ স্লিপ পাঠান' : 'Send Slip to Driver WhatsApp'}</span>
+                                </button>
+
+                                <div className="flex items-center gap-1.5">
+                                  {/* Voice Edit */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenVoiceAssign(trip.type === 'lead' ? trip.rawLead : null, trip.carId, currentActiveDay.dateStr)}
+                                    className="flex-1 py-1.5 px-2 rounded-lg bg-white hover:bg-indigo-50 text-indigo-700 text-[11px] font-bold border border-slate-200 flex items-center justify-center gap-1 cursor-pointer"
+                                  >
+                                    <Mic className="w-3 h-3 text-indigo-600" />
+                                    <span>{isBn ? 'ভয়েস এডিট' : 'Voice Edit'}</span>
+                                  </button>
+
+                                  {/* Manual Edit */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (trip.type === 'lead' && trip.rawLead) {
+                                        setEditingBooking(trip.rawLead);
+                                      } else if (trip.type === 'schedule' && trip.rawSchedule) {
+                                        const matchingCar = cars.find(c => c.id === trip.carId) || cars[0];
+                                        handleOpenScheduleModal(matchingCar, currentActiveDay.dateStr);
+                                      }
+                                    }}
+                                    className="flex-1 py-1.5 px-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-[11px] font-bold border border-slate-200 flex items-center justify-center gap-1 cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-slate-600" />
+                                    <span>{isBn ? 'এডিট' : 'Edit'}</span>
+                                  </button>
+
+                                  {/* Cancel / Delete */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (trip.type === 'schedule') {
+                                        handleClearCarSchedule(trip.carId, currentActiveDay.dateStr);
+                                      } else if (trip.type === 'lead' && trip.rawLead) {
+                                        handleDeleteBooking(trip.rawLead.id);
+                                      }
+                                    }}
+                                    className="p-1.5 rounded-lg bg-white hover:bg-rose-50 text-rose-600 border border-slate-200 cursor-pointer"
+                                    title="Delete / Cancel Trip"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               </div>
                             </div>
-
-                            {/* Booking or Available Status Details */}
-                            <div className="p-4 space-y-2 text-xs">
-                              {isAvailable ? (
-                                <div className="py-4 text-center text-slate-400 space-y-1">
-                                  <CheckCircle2 className="w-6 h-6 text-emerald-500 mx-auto" />
-                                  <p className="font-bold text-slate-700 text-xs">
-                                    {isBn ? 'গাড়িটি ট্রিপের জন্য প্রস্তুত' : 'Ready for New Booking'}
-                                  </p>
-                                  <p className="text-[11px] text-slate-400">
-                                    {isBn ? 'বুকিং যোগ করতে নিচের বাটনে চাপুন' : 'Click assign to set trip details'}
-                                  </p>
-                                </div>
-                              ) : (
-                                <div className="space-y-2 bg-white p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                                  {/* Customer & Route */}
-                                  {schedule.customerName && (
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-slate-500 font-semibold">{isBn ? 'যাত্রী:' : 'Customer:'}</span>
-                                      <span className="font-black text-slate-900">{schedule.customerName}</span>
-                                    </div>
-                                  )}
-
-                                  {schedule.customerPhone && (
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-slate-500 font-semibold">{isBn ? 'ফোন:' : 'Phone:'}</span>
-                                      <div className="flex items-center gap-2">
-                                        <a href={`tel:${schedule.customerPhone}`} className="font-bold text-blue-600 hover:underline">
-                                          {schedule.customerPhone}
-                                        </a>
-                                        <a 
-                                          href={`https://wa.me/91${schedule.customerPhone.replace(/\D/g, '')}`} 
-                                          target="_blank" 
-                                          rel="noreferrer"
-                                          className="text-emerald-600 hover:text-emerald-700"
-                                        >
-                                          <MessageSquare className="w-3.5 h-3.5 fill-current" />
-                                        </a>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {schedule.destination && (
-                                    <div className="pt-1 border-t border-slate-100">
-                                      <span className="text-[10px] text-slate-400 font-bold block">{isBn ? 'রুট / গন্তব্য:' : 'Trip Route:'}</span>
-                                      <div className="flex items-center gap-1.5 font-bold text-slate-800 text-[11px] mt-0.5">
-                                        <span className="truncate">{schedule.pickup || 'Jamalpur'}</span>
-                                        <ArrowRight className="w-3 h-3 text-indigo-500 shrink-0" />
-                                        <span className="truncate text-indigo-700">{schedule.destination}</span>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {/* Driver Info if Assigned */}
-                                  {schedule.driverName && (
-                                    <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-[11px]">
-                                      <span className="text-slate-500 font-semibold">{isBn ? 'ড্রাইভার:' : 'Driver:'}</span>
-                                      <span className="font-black text-indigo-900">
-                                        {schedule.driverName} {schedule.driverPhone ? `(${schedule.driverPhone})` : ''}
-                                      </span>
-                                    </div>
-                                  )}
-
-                                  {/* Fare & Advance */}
-                                  {(schedule.fareEstimate || schedule.advanceAmount) && (
-                                    <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-[11px]">
-                                      <span className="text-slate-500 font-semibold">{isBn ? 'ভাড়া / অগ্রিম:' : 'Fare / Adv:'}</span>
-                                      <span className="font-black text-slate-900">
-                                        ₹{schedule.fareEstimate || '0'} {schedule.advanceAmount ? `(Adv: ₹${schedule.advanceAmount})` : ''}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Action Buttons */}
-                          <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center gap-2">
-                            <button
-                              onClick={() => handleQuickToggleCarStatus(car.id, currentActiveDay.dateStr)}
-                              className="flex-1 py-2 px-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-bold transition-all flex items-center justify-center gap-1 shadow-2xs"
-                              title="Toggle Status"
-                            >
-                              <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
-                              <span className="truncate">{isBn ? 'স্ট্যাটাস বদলান' : 'Quick Toggle'}</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleOpenScheduleModal(car, currentActiveDay.dateStr)}
-                              className="flex-1 py-2 px-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold transition-all flex items-center justify-center gap-1 shadow-2xs active:scale-95"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                              <span className="truncate">{isBn ? 'শিডিউল এডিট' : 'Assign / Edit'}</span>
-                            </button>
-                          </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      /* Empty State for Date with no trips */
+                      <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-4 shadow-xs">
+                        <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto border border-blue-100">
+                          <CalendarDays className="w-7 h-7" />
                         </div>
-                      );
-                    })}
+
+                        <div className="space-y-1 max-w-md mx-auto">
+                          <h4 className="text-base font-black text-slate-900">
+                            {isBn ? 'এই তারিখে কোনো ট্রিপ নেই' : 'No Trips Booked on this Date'}
+                          </h4>
+                          <p className="text-xs text-slate-500">
+                            {isBn 
+                              ? 'বাংলা ভয়েস কমান্ড বা বুকিং ফর্ম ব্যবহার করে সহজেই নতুন ট্রিপ যোগ করুন।' 
+                              : 'Use Bengali voice command or booking form to add new trips for this date.'}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-center gap-3 pt-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenVoiceAssign(null, undefined, currentActiveDay.dateStr)}
+                            className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-black shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                          >
+                            <Mic className="w-4 h-4 text-amber-300" />
+                            <span>{isBn ? '🎙️ ভয়েসে ট্রিপ বুক করুন' : '🎙️ Voice Book Trip'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenLocalTripModal(undefined, currentActiveDay.dateStr)}
+                            className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                          >
+                            <Plus className="w-4 h-4" />
+                            <span>{isBn ? '+ ট্রিপ যোগ করুন' : '+ Add Trip'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* TAB 2: FUTURE BOOKINGS VIEW (WITH ALL DETAILS & BENGALI CALENDAR DATES) */}
               {activeTab === 'future' && (
@@ -2532,7 +2760,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 <Car className="w-5 h-5 text-amber-300" />
                 <div>
                   <h4 className="text-sm sm:text-base font-black">
-                    {isBn ? selectedCarForSchedule.nameBn : selectedCarForSchedule.name}
+                    {selectedCarForSchedule.seats} • {selectedCarForSchedule.category}
                   </h4>
                   <p className="text-xs text-blue-100 font-bengali">
                     {formatFullBengaliDate(scheduleFormData.dateStr)}
@@ -2613,28 +2841,69 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               </div>
 
-              {/* Driver Details */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'ড্রাইভারের নাম:' : 'Driver Name:'}</label>
-                  <input
-                    type="text"
-                    value={scheduleFormData.driverName}
-                    onChange={(e) => setScheduleFormData({ ...scheduleFormData, driverName: e.target.value })}
-                    placeholder="Driver Name"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-blue-600 outline-none"
-                  />
+              {/* Driver Details with Quick Directory and Voice Assign */}
+              <div className="space-y-2 bg-slate-50 p-3 rounded-2xl border border-slate-200/80">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                    <UserCheck className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>{isBn ? 'ড্রাইভার অ্যাসাইন ও তথ্য:' : 'Driver Information:'}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScheduleModalOpen(false);
+                      handleOpenVoiceAssign(null, scheduleFormData.carId, scheduleFormData.dateStr);
+                    }}
+                    className="py-1 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-2xs cursor-pointer active:scale-95"
+                  >
+                    <Mic className="w-3 h-3 text-amber-300 animate-pulse" />
+                    <span>{isBn ? 'ভয়েসে বলুন' : 'Voice Input'}</span>
+                  </button>
                 </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">{isBn ? 'ড্রাইভারের ফোন:' : 'Driver Phone:'}</label>
-                  <input
-                    type="tel"
-                    value={scheduleFormData.driverPhone}
-                    onChange={(e) => setScheduleFormData({ ...scheduleFormData, driverPhone: e.target.value })}
-                    placeholder="Driver Mobile"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-blue-600 outline-none"
-                  />
+                {/* Quick Driver Pills */}
+                {drivers.length > 0 && (
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                    <span className="text-[10px] text-slate-400 font-bold shrink-0">{isBn ? 'তালিকা:' : 'Quick:'}</span>
+                    {drivers.slice(0, 4).map(d => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => setScheduleFormData({
+                          ...scheduleFormData,
+                          driverName: d.name,
+                          driverPhone: d.phone
+                        })}
+                        className="px-2 py-0.5 rounded-md bg-white border border-slate-200 hover:border-indigo-400 text-slate-700 text-[11px] font-bold shrink-0 transition-all"
+                      >
+                        {d.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">{isBn ? 'ড্রাইভারের নাম:' : 'Driver Name:'}</label>
+                    <input
+                      type="text"
+                      value={scheduleFormData.driverName}
+                      onChange={(e) => setScheduleFormData({ ...scheduleFormData, driverName: e.target.value })}
+                      placeholder="Driver Name"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-blue-600 outline-none bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">{isBn ? 'ড্রাইভারের ফোন:' : 'Driver Phone:'}</label>
+                    <input
+                      type="tel"
+                      value={scheduleFormData.driverPhone}
+                      onChange={(e) => setScheduleFormData({ ...scheduleFormData, driverPhone: e.target.value })}
+                      placeholder="Driver Mobile"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:border-blue-600 outline-none bg-white"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -3102,6 +3371,35 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           setDrivers(updated);
           localStorage.setItem('cholo_jai_drivers', JSON.stringify(updated));
         }}
+        lang={lang}
+      />
+
+      {/* 4-DAY MATRIX LOCAL TRIP BOOKING MODAL */}
+      <LocalTripBookingModal
+        isOpen={showLocalTripModal}
+        onClose={() => setShowLocalTripModal(false)}
+        onSaveBooking={handleSaveLocalTripBooking}
+        cars={cars}
+        drivers={drivers}
+        selectedCarId={localTripSelectedCarId}
+        selectedDateStr={localTripSelectedDateStr}
+        lang={lang}
+      />
+
+      {/* 4-DAY MATRIX BENGALI VOICE RECOGNITION TRIP BOOKING & DRIVER MODAL */}
+      <BengaliVoiceAssignModal
+        isOpen={showVoiceAssignModal}
+        onClose={() => {
+          setShowVoiceAssignModal(false);
+          setVoiceAssignTargetBooking(null);
+          setVoiceAssignTargetCarId(null);
+        }}
+        drivers={drivers}
+        cars={cars}
+        selectedCarId={voiceAssignTargetCarId || cars[0]?.id}
+        selectedDateStr={voiceAssignTargetDateStr || currentActiveDay.dateStr}
+        targetBooking={voiceAssignTargetBooking}
+        onSaveVoiceBooking={handleSaveVoiceTripBooking}
         lang={lang}
       />
 

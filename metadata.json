@@ -1,6 +1,8 @@
 {
   "name": "Cholo Jai Tour & Travels",
   "description": "Professional car rental and tour agency in Jamalpur, Purba Bardhaman featuring a vehicle fleet (Ertiga, Rumion White & Silver, Scorpio Classic, WagonR, Swift Dzire) with AC/Non-AC options for All-India tours and events.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

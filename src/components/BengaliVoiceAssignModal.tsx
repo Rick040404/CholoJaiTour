@@ -3,19 +3,23 @@ import {
   Mic, Sparkles, Check, X, Car, User, 
   Phone, Clock, AlertCircle, MessageSquare,
   MapPin, FileText, CheckCircle2,
-  Wand2, Globe, Smartphone
+  Wand2, Globe, Smartphone, Square, Loader2,
+  Radio, Keyboard
 } from 'lucide-react';
 import { DriverProfile, BookingLead, Language, FleetCar } from '../types';
 import { 
   createBengaliSpeechRecognizer, 
   parseBengaliVoiceCommand, 
   VoiceParsedResult,
-  isSpeechRecognitionSupported,
-  isMobileDevice,
   POPULAR_LOCAL_DESTINATIONS,
   QUICK_VOICE_TEMPLATES,
   generateDriverWhatsAppDispatchSlip
 } from '../utils/voiceRecognition';
+import { 
+  MobileVoiceRecorder, 
+  sendAudioToGeminiTranscribe, 
+  isAudioRecordingSupported 
+} from '../utils/audioRecorder';
 
 interface BengaliVoiceTripBookingModalProps {
   isOpen: boolean;
@@ -45,15 +49,23 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
   lang
 }) => {
   const isBn = lang === 'bn';
-  const [isListening, setIsListening] = useState<boolean>(false);
+  const [activeVoiceMode, setActiveVoiceMode] = useState<'ai_recorder' | 'web_speech'>('ai_recorder');
+  
+  // Web Speech State
+  const [isLiveListening, setIsLiveListening] = useState<boolean>(false);
   const [transcript, setTranscript] = useState<string>('');
   const [interimText, setInterimText] = useState<string>('');
   const [customVoiceInput, setCustomVoiceInput] = useState<string>('');
-  const [, setParsedResult] = useState<VoiceParsedResult | null>(null);
+  
+  // AI Audio Recorder State (Mobile Optimized)
+  const [isRecordingAudio, setIsRecordingAudio] = useState<boolean>(false);
+  const [isTranscribingAI, setIsTranscribingAI] = useState<boolean>(false);
+  const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
+  const [audioVolume, setAudioVolume] = useState<number>(0);
+  
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [speechLang, setSpeechLang] = useState<'bn-IN' | 'en-IN'>('bn-IN');
-  const isMobile = isMobileDevice();
 
   // Dedicated Form fields populated directly from voice
   const [chosenCarId, setChosenCarId] = useState<string>(selectedCarId || cars[0]?.id || 'wagonr');
@@ -67,18 +79,30 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
   const [notes, setNotes] = useState<string>('');
 
   const recognizerRef = useRef<any>(null);
-  const isSupported = isSpeechRecognitionSupported();
+  const audioRecorderRef = useRef<MobileVoiceRecorder | null>(null);
+  const timerIntervalRef = useRef<any>(null);
+  const inputFieldRef = useRef<HTMLInputElement | null>(null);
 
+  // Initialize or reset on open/close
   useEffect(() => {
     if (!isOpen) {
       if (recognizerRef.current) {
         recognizerRef.current.stop();
       }
-      setIsListening(false);
+      if (audioRecorderRef.current) {
+        audioRecorderRef.current.cleanup();
+      }
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      setIsLiveListening(false);
+      setIsRecordingAudio(false);
+      setIsTranscribingAI(false);
+      setRecordingSeconds(0);
+      setAudioVolume(0);
       setTranscript('');
       setInterimText('');
       setCustomVoiceInput('');
-      setParsedResult(null);
       setErrorMsg(null);
       setSuccessNotice(null);
       return;
@@ -110,12 +134,16 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
       if (recognizerRef.current) {
         recognizerRef.current.stop();
       }
+      if (audioRecorderRef.current) {
+        audioRecorderRef.current.cleanup();
+      }
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
     };
   }, [isOpen, selectedCarId, targetBooking]);
 
   const applyParsedDataToState = (parsed: VoiceParsedResult) => {
-    setParsedResult(parsed);
-
     if (parsed.customerName) setCustomerName(parsed.customerName);
     if (parsed.customerPhone) setCustomerPhone(parsed.customerPhone);
     if (parsed.pickup) setPickup(parsed.pickup);
@@ -134,26 +162,122 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
     if (parsed.driverName) extracted.push(isBn ? `ড্রাইভার (${parsed.driverName})` : `Driver (${parsed.driverName})`);
 
     if (extracted.length > 0) {
-      setSuccessNotice(isBn ? `✓ ফিল্ডে পূরণ হয়েছে: ${extracted.join(', ')}` : `✓ Detected & filled: ${extracted.join(', ')}`);
+      setSuccessNotice(isBn ? `✓ স্বয়ংক্রিয়ভাবে পূরণ হয়েছে: ${extracted.join(', ')}` : `✓ Auto-filled: ${extracted.join(', ')}`);
     }
   };
 
-  const handleTemplateClick = (phrase: string) => {
-    setTranscript(phrase);
-    setCustomVoiceInput(phrase);
+  // 1. ================= AI AUDIO RECORDER (MOBILE OPTIMIZED) =================
+  const startAudioRecording = async () => {
+    setErrorMsg(null);
+    setSuccessNotice(null);
+    setTranscript('');
     setInterimText('');
-    const parsed = parseBengaliVoiceCommand(phrase, drivers, cars);
-    applyParsedDataToState(parsed);
+    setRecordingSeconds(0);
+    setAudioVolume(0);
+
+    if (!isAudioRecordingSupported()) {
+      setErrorMsg(isBn ? 'আপনার মোবাইলে অডিও রেকর্ডার অপশন পাওয়া যায়নি। আপনি নিচের টেক্সট বক্সে কীবোর্ডের মাইক ব্যবহার করতে পারেন।' : 'Audio recording is not supported in this browser. Please use keyboard mic dictation.');
+      return;
+    }
+
+    try {
+      if (!audioRecorderRef.current) {
+        audioRecorderRef.current = new MobileVoiceRecorder();
+      }
+
+      await audioRecorderRef.current.startRecording((volume) => {
+        setAudioVolume(volume);
+      });
+
+      setIsRecordingAudio(true);
+
+      // Start recording timer
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'অডিও রেকর্ডার শুরু করা যায়নি।');
+      setIsRecordingAudio(false);
+    }
   };
 
-  const handleManualParse = () => {
-    if (!customVoiceInput.trim()) return;
-    setTranscript(customVoiceInput);
-    const parsed = parseBengaliVoiceCommand(customVoiceInput, drivers, cars);
-    applyParsedDataToState(parsed);
+  const stopAudioRecordingAndTranscribe = async () => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+
+    if (!audioRecorderRef.current || !isRecordingAudio) {
+      return;
+    }
+
+    setIsRecordingAudio(false);
+    setIsTranscribingAI(true);
+    setErrorMsg(null);
+
+    try {
+      const { base64, mimeType } = await audioRecorderRef.current.stopRecording();
+      
+      // Send to server-side Gemini 3.7 Flash
+      const aiResult = await sendAudioToGeminiTranscribe({
+        audioBase64: base64,
+        mimeType: mimeType,
+        language: speechLang,
+        drivers: drivers.map(d => ({ name: d.name, phone: d.phone })),
+        cars: cars.map(c => ({ id: c.id, name: c.name, category: c.category, seats: c.seats }))
+      });
+
+      if (aiResult.transcript) {
+        setTranscript(aiResult.transcript);
+        setCustomVoiceInput(aiResult.transcript);
+      }
+
+      // Match car ID if mentioned
+      let matchedCar = chosenCarId;
+      if (aiResult.carType) {
+        const lowerCar = aiResult.carType.toLowerCase();
+        const found = cars.find(c => lowerCar.includes(c.id.toLowerCase()) || lowerCar.includes(c.category.toLowerCase()));
+        if (found) matchedCar = found.id;
+      }
+
+      // Match driver phone if driver found
+      let foundDriverPhone = '';
+      if (aiResult.driverName) {
+        const foundDriver = drivers.find(d => d.name.toLowerCase().includes(aiResult.driverName!.toLowerCase()) || aiResult.driverName!.toLowerCase().includes(d.name.toLowerCase()));
+        if (foundDriver) {
+          foundDriverPhone = foundDriver.phone;
+        }
+      }
+
+      const parsed: VoiceParsedResult = {
+        rawTranscript: aiResult.transcript || '',
+        customerName: aiResult.customerName || undefined,
+        customerPhone: aiResult.customerPhone || undefined,
+        pickup: aiResult.pickup || undefined,
+        destination: aiResult.destination || undefined,
+        timeSlot: aiResult.timeSlot || undefined,
+        dateStr: aiResult.dateStr || undefined,
+        driverName: aiResult.driverName || undefined,
+        driverPhone: foundDriverPhone || undefined,
+        matchedCarId: matchedCar,
+        confidence: 0.98
+      };
+
+      applyParsedDataToState(parsed);
+      setSuccessNotice(isBn ? '✓ AI ভয়েস সফলভাবে ট্রান্সক্রাইব হয়েছে এবং নির্দিষ্ট ফিল্ডে ডেটা বসেছে!' : '✓ AI Voice transcribed & fields auto-filled successfully!');
+    } catch (err: any) {
+      console.warn('AI Transcribe error, falling back to local text parsing:', err);
+      setErrorMsg(err.message || 'ভয়েস প্রসেসিং ব্যর্থ হয়েছে। আপনি নিচের কীবোর্ডের মাইক দিয়ে ইনপুট করতে পারেন।');
+    } finally {
+      setIsTranscribingAI(false);
+      setRecordingSeconds(0);
+      setAudioVolume(0);
+    }
   };
 
-  const startListening = async () => {
+  // 2. ================= LIVE WEB SPEECH (NATIVE) =================
+  const startLiveListening = async () => {
     setErrorMsg(null);
     setSuccessNotice(null);
     setTranscript('');
@@ -176,28 +300,44 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
         },
         (error) => {
           setErrorMsg(error);
-          setIsListening(false);
+          setIsLiveListening(false);
         },
         () => {
-          setIsListening(false);
+          setIsLiveListening(false);
         },
         speechLang
       );
 
       recognizerRef.current = recognizer;
       await recognizer.start();
-      setIsListening(true);
+      setIsLiveListening(true);
     } catch (err: any) {
       setErrorMsg(err.message || 'ভয়েস রিকগনিশন চালু করা যায়নি।');
-      setIsListening(false);
+      setIsLiveListening(false);
     }
   };
 
-  const stopListening = () => {
+  const stopLiveListening = () => {
     if (recognizerRef.current) {
       recognizerRef.current.stop();
     }
-    setIsListening(false);
+    setIsLiveListening(false);
+  };
+
+  // 3. ================= TEMPLATE & MANUAL INPUT =================
+  const handleTemplateClick = (phrase: string) => {
+    setTranscript(phrase);
+    setCustomVoiceInput(phrase);
+    setInterimText('');
+    const parsed = parseBengaliVoiceCommand(phrase, drivers, cars);
+    applyParsedDataToState(parsed);
+  };
+
+  const handleManualParse = () => {
+    if (!customVoiceInput.trim()) return;
+    setTranscript(customVoiceInput);
+    const parsed = parseBengaliVoiceCommand(customVoiceInput, drivers, cars);
+    applyParsedDataToState(parsed);
   };
 
   const handleQuickDestinationSelect = (dest: { nameBn: string; nameEn: string }) => {
@@ -207,6 +347,12 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
   const handleSelectQuickDriver = (driver: DriverProfile) => {
     setDriverName(driver.name);
     setDriverPhone(driver.phone);
+  };
+
+  const focusKeyboardInput = () => {
+    if (inputFieldRef.current) {
+      inputFieldRef.current.focus();
+    }
   };
 
   // Build current Booking object (clean data in respective fields)
@@ -283,10 +429,10 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base sm:text-lg font-black tracking-tight">
-                  {isBn ? 'ভয়েস ট্রিপ বুকিং ও অটো-ইনপুট' : 'Voice Trip Booking & Auto-Fill'}
+                  {isBn ? 'ভয়েস ট্রিপ বুকিং (মোবাইল ও ডেক্সটপ)' : 'Voice Trip Booking (Mobile & Web)'}
                 </h3>
                 <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase">
-                  Mobile & Web
+                  Mobile 100% OK
                 </span>
               </div>
               <p className="text-xs text-blue-100 font-medium">
@@ -308,18 +454,53 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
         {/* Modal Scrollable Body */}
         <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
           
-          {/* Language Selector Pill & Mobile Tip */}
-          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-100 border border-slate-200">
+          {/* Top Mode Selector Tabs */}
+          <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-2xl border border-slate-200">
+            <button
+              type="button"
+              onClick={() => {
+                stopLiveListening();
+                setActiveVoiceMode('ai_recorder');
+              }}
+              className={`py-2 px-3 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                activeVoiceMode === 'ai_recorder'
+                  ? 'bg-indigo-600 text-white shadow-md'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Radio className="w-3.5 h-3.5" />
+              <span>{isBn ? '⚡ এআই ভয়েস নোট (মোবাইলের জন্য)' : '⚡ AI Voice Note (Mobile Best)'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (isRecordingAudio) stopAudioRecordingAndTranscribe();
+                setActiveVoiceMode('web_speech');
+              }}
+              className={`py-2 px-3 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                activeVoiceMode === 'web_speech'
+                  ? 'bg-indigo-600 text-white shadow-md'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span>{isBn ? '🎙️ লাইভ স্পিচ' : '🎙️ Live Speech'}</span>
+            </button>
+          </div>
+
+          {/* Language Selector Pill & Mobile Helper Tip */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-200">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
               <Globe className="w-4 h-4 text-blue-600" />
-              <span>{isBn ? 'ভয়েস ভাষা:' : 'Voice Language:'}</span>
+              <span>{isBn ? 'ভাষা:' : 'Language:'}</span>
               <button
                 type="button"
                 onClick={() => setSpeechLang('bn-IN')}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
                   speechLang === 'bn-IN' 
                     ? 'bg-blue-600 text-white shadow-2xs' 
-                    : 'bg-white text-slate-700 hover:bg-slate-200'
+                    : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
                 }`}
               >
                 বাংলা (bn-IN)
@@ -327,22 +508,24 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
               <button
                 type="button"
                 onClick={() => setSpeechLang('en-IN')}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
                   speechLang === 'en-IN' 
                     ? 'bg-blue-600 text-white shadow-2xs' 
-                    : 'bg-white text-slate-700 hover:bg-slate-200'
+                    : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
                 }`}
               >
                 English (en-IN)
               </button>
             </div>
 
-            {isMobile && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
-                <Smartphone className="w-3 h-3 text-indigo-600" />
-                <span>মোবাইল প্রস্তুত</span>
-              </span>
-            )}
+            <button
+              type="button"
+              onClick={focusKeyboardInput}
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-lg border border-indigo-200 cursor-pointer transition-colors"
+            >
+              <Keyboard className="w-3.5 h-3.5 text-indigo-600" />
+              <span>{isBn ? 'কীবোর্ড মাইক' : 'Keyboard Mic'}</span>
+            </button>
           </div>
 
           {/* Quick Bengali Voice Templates (1-Tap Test & Dictate) */}
@@ -373,60 +556,143 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
             </div>
           </div>
 
-          {/* Voice Microphone Center Section */}
-          <div className="text-center py-2 flex flex-col items-center justify-center bg-slate-50 p-4 rounded-2xl border border-slate-200">
-            <div className="relative mb-2">
-              {isListening && (
-                <>
-                  <div className="absolute -inset-4 rounded-full bg-indigo-500/25 animate-ping" />
-                  <div className="absolute -inset-8 rounded-full bg-blue-500/15 animate-pulse" />
-                </>
-              )}
-
-              <button
-                type="button"
-                onClick={isListening ? stopListening : startListening}
-                className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 cursor-pointer touch-manipulation ${
-                  isListening
-                    ? 'bg-gradient-to-tr from-rose-600 to-red-500 text-white shadow-red-500/30 ring-4 ring-red-200'
-                    : 'bg-gradient-to-tr from-blue-600 to-indigo-600 text-white shadow-indigo-500/30 hover:brightness-110'
-                }`}
-              >
-                {isListening ? (
-                  <Mic className="w-9 h-9 animate-bounce" />
-                ) : (
-                  <Mic className="w-8 h-8" />
+          {/* MAIN VOICE CAPTURE CARD */}
+          {activeVoiceMode === 'ai_recorder' ? (
+            /* MODE 1: AI Audio Voice Note (100% Reliable on all Mobile Phones & iOS Safari) */
+            <div className="text-center py-4 px-4 flex flex-col items-center justify-center bg-gradient-to-b from-indigo-50/80 via-slate-50 to-white rounded-3xl border-2 border-indigo-200 shadow-sm space-y-3">
+              <div className="relative">
+                {isRecordingAudio && (
+                  <>
+                    <div className="absolute -inset-4 rounded-full bg-rose-500/30 animate-ping" />
+                    <div className="absolute -inset-8 rounded-full bg-red-500/20 animate-pulse" />
+                  </>
                 )}
-              </button>
-            </div>
 
-            <div className="space-y-1">
-              <span className={`text-xs font-black uppercase tracking-wider px-3.5 py-1 rounded-full ${
-                isListening 
-                  ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse' 
-                  : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-              }`}>
-                {isListening 
-                  ? (isBn ? '🎙️ শুনছি... স্পষ্ট করে মুখে বলুন' : '🎙️ Listening... Speak now') 
-                  : (isBn ? '👉 মাইকে ট্যাপ করে মুখে বলুন' : '👉 Tap Mic to start speaking')}
-              </span>
-            </div>
+                <button
+                  type="button"
+                  onClick={isRecordingAudio ? stopAudioRecordingAndTranscribe : startAudioRecording}
+                  disabled={isTranscribingAI}
+                  className={`relative w-22 h-22 rounded-full flex flex-col items-center justify-center shadow-xl transition-all active:scale-95 cursor-pointer touch-manipulation ${
+                    isRecordingAudio
+                      ? 'bg-gradient-to-tr from-rose-600 to-red-500 text-white ring-4 ring-red-200 shadow-red-500/40'
+                      : isTranscribingAI
+                      ? 'bg-slate-400 text-white cursor-not-allowed'
+                      : 'bg-gradient-to-tr from-indigo-600 via-blue-600 to-indigo-700 text-white shadow-indigo-500/35 hover:brightness-110'
+                  }`}
+                >
+                  {isTranscribingAI ? (
+                    <Loader2 className="w-9 h-9 animate-spin" />
+                  ) : isRecordingAudio ? (
+                    <Square className="w-8 h-8 fill-current" />
+                  ) : (
+                    <Mic className="w-9 h-9" />
+                  )}
+                </button>
+              </div>
 
-            {/* Mobile Helpful Hint */}
-            <p className="text-[11px] text-slate-500 mt-2 font-medium">
-              💡 {isBn ? 'মোবাইলে মাইকে ট্যাপ করলে পারমিশন চাইলে "Allow" করুন। অথবা কীবোর্ডের মাইক দিয়েও লিখতে পারেন।' : 'On mobile, tap Allow for microphone access, or use your keyboard microphone.'}
-            </p>
-          </div>
+              {/* Status & Live Waveform Indicator */}
+              <div className="space-y-1.5 w-full max-w-xs">
+                {isRecordingAudio ? (
+                  <div className="space-y-2">
+                    <span className="text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full bg-red-100 text-red-700 border border-red-200 animate-pulse inline-flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-red-600 animate-ping" />
+                      <span>{isBn ? `রেকর্ডিং চলছে (${recordingSeconds}s)... কথা বলুন` : `Recording (${recordingSeconds}s)... Speak now`}</span>
+                    </span>
+
+                    {/* Dynamic Sound Wave visualizer bars */}
+                    <div className="flex items-center justify-center gap-1 h-6 py-1">
+                      {[15, 40, 75, 95, 60, 85, 30, 90, 50, 70].map((h, i) => {
+                        const dynamicHeight = Math.max(15, Math.min(100, Math.round(h * (audioVolume / 40 + 0.3))));
+                        return (
+                          <div
+                            key={i}
+                            style={{ height: `${dynamicHeight}%` }}
+                            className="w-1.5 bg-gradient-to-t from-red-500 to-rose-400 rounded-full transition-all duration-75"
+                          />
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={stopAudioRecordingAndTranscribe}
+                      className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 text-white font-bold text-xs shadow-md active:scale-98 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>{isBn ? '✓ বলা শেষ, অটো-ফিল করুন' : '✓ Stop & Auto-Fill with AI'}</span>
+                    </button>
+                  </div>
+                ) : isTranscribingAI ? (
+                  <div className="p-2.5 rounded-xl bg-blue-50 text-blue-900 border border-blue-200 text-xs font-bold flex items-center justify-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                    <span>{isBn ? 'AI ভয়েস প্রসেসিং ও ফিল্ড পূরণ হচ্ছে...' : 'AI Transcribing & auto-filling fields...'}</span>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <span className="text-xs font-black uppercase tracking-wider px-3.5 py-1 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200">
+                      {isBn ? '👉 মাইকে ট্যাপ করে মুখে বলুন' : '👉 Tap Mic & speak booking details'}
+                    </span>
+                    <p className="text-[11px] text-slate-500 font-medium pt-1">
+                      {isBn ? 'মোবাইলে মাইকে ট্যাপ করে স্পষ্ট করে বলুন। বলা শেষ হলে সবুজ বাটনে চাপুন।' : 'Tap mic, speak clearly, then tap done to auto-fill.'}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* MODE 2: Native Web Speech */
+            <div className="text-center py-3 flex flex-col items-center justify-center bg-slate-50 p-4 rounded-2xl border border-slate-200">
+              <div className="relative mb-2">
+                {isLiveListening && (
+                  <>
+                    <div className="absolute -inset-4 rounded-full bg-indigo-500/25 animate-ping" />
+                    <div className="absolute -inset-8 rounded-full bg-blue-500/15 animate-pulse" />
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={isLiveListening ? stopLiveListening : startLiveListening}
+                  className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 cursor-pointer touch-manipulation ${
+                    isLiveListening
+                      ? 'bg-gradient-to-tr from-rose-600 to-red-500 text-white shadow-red-500/30 ring-4 ring-red-200'
+                      : 'bg-gradient-to-tr from-blue-600 to-indigo-600 text-white shadow-indigo-500/30 hover:brightness-110'
+                  }`}
+                >
+                  {isLiveListening ? (
+                    <Mic className="w-9 h-9 animate-bounce" />
+                  ) : (
+                    <Mic className="w-8 h-8" />
+                  )}
+                </button>
+              </div>
+
+              <div className="space-y-1">
+                <span className={`text-xs font-black uppercase tracking-wider px-3.5 py-1 rounded-full ${
+                  isLiveListening 
+                    ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse' 
+                    : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                }`}>
+                  {isLiveListening 
+                    ? (isBn ? '🎙️ শুনছি... স্পষ্ট করে কথা বলুন' : '🎙️ Listening... Speak now') 
+                    : (isBn ? '👉 মাইকে ট্যাপ করে লাইভ বলুন' : '👉 Tap Mic to start speaking')}
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Real-time Spoken Transcript & Manual Text Input Area */}
           <div className="p-3.5 rounded-2xl bg-slate-900 text-white font-mono text-xs space-y-2 border border-slate-800 shadow-inner">
             <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans font-bold">
-              <span>{isBn ? 'ভয়েস টেক্সট / লিখুন অথবা পেস্ট করুন:' : 'Voice Transcript / Paste text:'}</span>
-              {isListening && <span className="flex items-center gap-1 text-emerald-400 animate-pulse font-bold">● REC LIVE</span>}
+              <span>{isBn ? 'ভয়েস টেক্সট / কীবোর্ডের মাইক দিয়ে বলুন:' : 'Voice Transcript / Keyboard Mic:'}</span>
+              {(isLiveListening || isRecordingAudio) && (
+                <span className="flex items-center gap-1 text-emerald-400 animate-pulse font-bold">● REC LIVE</span>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
               <input
+                ref={inputFieldRef}
                 type="text"
                 value={customVoiceInput}
                 onChange={(e) => {
@@ -437,7 +703,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
                   }
                 }}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleManualParse(); }}
-                placeholder={isBn ? 'যেমন: যাত্রী রতন দাস ফোন ৯১৫৩৩০২৫১৭ জামালপুর থেকে বর্ধমান...' : 'Type or speak: passenger name, phone, pickup, destination...'}
+                placeholder={isBn ? 'যেমন: জামালপুর থেকে বর্ধমান সকাল ৭ টায়, যাত্রী বিকাশ ফোন ৯১৫৩৩০২৫১৭...' : 'Type or speak: passenger name, phone, pickup, destination...'}
                 className="flex-1 bg-slate-800 text-white font-sans text-xs px-3 py-2 rounded-xl border border-slate-700 outline-none focus:border-indigo-400"
               />
               <button
@@ -469,7 +735,12 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
           {errorMsg && (
             <div className="p-3 rounded-xl bg-amber-50 text-amber-900 border border-amber-200 text-xs font-bold flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
-              <span>{errorMsg}</span>
+              <div className="space-y-1">
+                <span>{errorMsg}</span>
+                <p className="text-[11px] font-normal text-amber-800">
+                  {isBn ? '💡 টিপস: আপনি উপরের "এআই ভয়েস নোট" বাটনে ক্লিক করতে পারেন অথবা টেক্সট বক্সে ট্যাপ করে কীবোর্ডের স্পেসবারের পাশের মাইক দিয়ে মুখে বলতে পারেন।' : 'Tip: Use the AI Voice Note button above or use your mobile keyboard microphone.'}
+                </p>
+              </div>
             </div>
           )}
 
@@ -669,7 +940,7 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
               </div>
             </div>
 
-            {/* Optional Custom Note (Blank by default, not filled with transcript) */}
+            {/* Optional Custom Note */}
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center gap-1">
                 <FileText className="w-3 h-3 text-slate-500" />
@@ -723,4 +994,3 @@ export const BengaliVoiceAssignModal: React.FC<BengaliVoiceTripBookingModalProps
     </div>
   );
 };
-

@@ -808,13 +808,6 @@ export function createBengaliSpeechRecognizer(
   return {
     start: async () => {
       try {
-        // Request microphone permission on mobile/desktop first
-        const perm = await requestMicrophonePermission();
-        if (!perm.granted && perm.error) {
-          onError(perm.error);
-          return;
-        }
-
         if (!recognition) initRecognizer();
         listening = true;
         recognition.start();
@@ -824,8 +817,9 @@ export function createBengaliSpeechRecognizer(
           initRecognizer();
           recognition.start();
           listening = true;
-        } catch (e2) {
-          onError('মাইক্রোফোন চালু করা যায়নি। অনুগ্রহ করে মাইকে ট্যাপ করে মাইক্রোফোন অনুমতি দিন।');
+        } catch (e2: any) {
+          listening = false;
+          onError('মাইক্রোফোন সরাসরি চালু করা যায়নি। আপনি "এআই ভয়েস রেকর্ড" বাটনে ক্লিক করে কথা বলতে পারেন।');
         }
       }
     },

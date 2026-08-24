@@ -2,11 +2,29 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI, Type } from '@google/genai';
 
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// Lazy initialize Gemini Client
+let geminiClient: GoogleGenAI | null = null;
+function getGemini(): GoogleGenAI | null {
+  if (!geminiClient && process.env.GEMINI_API_KEY) {
+    geminiClient = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  }
+  return geminiClient;
+}
 
 // Persistent JSON file path for multi-device sync
 const DATA_FILE = path.join(process.cwd(), 'server_data.json');
@@ -269,6 +287,121 @@ app.post('/api/sync', (req, res) => {
   }
 
   res.json(store);
+});
+
+// ================= AI VOICE TRANSCRIPTION & SMART DISPATCH =================
+
+app.post('/api/transcribe-voice', async (req, res) => {
+  try {
+    const { audioBase64, mimeType, text, drivers, cars } = req.body;
+
+    const ai = getGemini();
+    if (!ai) {
+      return res.status(503).json({
+        error: 'Gemini AI API Key is not configured on the server. Please use local speech or templates.',
+      });
+    }
+
+    const currentDateStr = new Date().toISOString().split('T')[0];
+    const systemPrompt = `You are an expert multilingual audio transcriber and travel booking assistant for 'Cholo Jai Tour & Travels' located in Jamalpur, Purba Bardhaman, West Bengal.
+Your task is to transcribe Bengali, Bengali-English mixed (Banglish), or English speech and extract all trip booking details into structured JSON.
+
+Known Drivers: ${drivers ? JSON.stringify(drivers) : 'Rahul, Tapas, Baban, Shubhankar, Amit'}
+Known Cars: ${cars ? JSON.stringify(cars) : 'Ertiga, Rumion Silver, Rumion White, Scorpio Classic, WagonR, Swift Dzire'}
+Reference Date (Today): ${currentDateStr}
+
+Rules:
+1. transcript: Exact transcription of what the speaker said in Bengali/English.
+2. customerName: Passenger / customer full name without words like "যাত্রী", "কাস্টমার", "নাম", "শ্রী", "বাবু". If none mentioned, return "".
+3. customerPhone: 10-digit Indian mobile number. Convert all Bengali digits (০-৯) or spoken numbers to a 10-digit number. Return "" if none.
+4. pickup: Starting point location (defaults to "জামালপুর" if not mentioned).
+5. destination: Destination place (e.g. "বর্ধমান স্টেশন", "মেমারি", "কলকাতা বিমানবন্দর", "তারাপীঠ", "দিঘা", "বিবাহ বাড়ি").
+6. timeSlot: Pickup time (e.g. "07:00 AM", "09:30 AM", "04:00 PM").
+7. dateStr: Booking date in YYYY-MM-DD format. If speaker said "আজকে" or "today", use ${currentDateStr}. If "কালকে" or "tomorrow", use next day.
+8. driverName: If any driver is requested or assigned (e.g. "রাহুল", "তাপস", "বাবান").
+9. carType: Matching car or seat count if mentioned.
+10. tripType: "Wedding / Biyebari", "Outstation Tour", or "Local Day Trip".
+11. notes: Brief notes if any luggage or AC requirement mentioned. Otherwise "".`;
+
+    let response;
+
+    if (audioBase64) {
+      // Multimodal audio transcription & entity extraction
+      response = await ai.models.generateContent({
+        model: 'gemini-3.7-flash',
+        contents: [
+          {
+            inlineData: {
+              mimeType: mimeType || 'audio/webm',
+              data: audioBase64,
+            },
+          },
+          {
+            text: systemPrompt,
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              transcript: { type: Type.STRING },
+              customerName: { type: Type.STRING },
+              customerPhone: { type: Type.STRING },
+              pickup: { type: Type.STRING },
+              destination: { type: Type.STRING },
+              timeSlot: { type: Type.STRING },
+              dateStr: { type: Type.STRING },
+              driverName: { type: Type.STRING },
+              carType: { type: Type.STRING },
+              tripType: { type: Type.STRING },
+              notes: { type: Type.STRING },
+            },
+            required: ['transcript', 'pickup', 'destination'],
+          },
+        },
+      });
+    } else if (text) {
+      // Text parsing with Gemini
+      response = await ai.models.generateContent({
+        model: 'gemini-3.7-flash',
+        contents: [
+          {
+            text: `${systemPrompt}\n\nParse this user command text:\n"${text}"`,
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              transcript: { type: Type.STRING },
+              customerName: { type: Type.STRING },
+              customerPhone: { type: Type.STRING },
+              pickup: { type: Type.STRING },
+              destination: { type: Type.STRING },
+              timeSlot: { type: Type.STRING },
+              dateStr: { type: Type.STRING },
+              driverName: { type: Type.STRING },
+              carType: { type: Type.STRING },
+              tripType: { type: Type.STRING },
+              notes: { type: Type.STRING },
+            },
+            required: ['transcript', 'pickup', 'destination'],
+          },
+        },
+      });
+    } else {
+      return res.status(400).json({ error: 'No audio or text provided' });
+    }
+
+    const responseText = response.text || '{}';
+    const parsed = JSON.parse(responseText);
+    res.json(parsed);
+  } catch (err: any) {
+    console.error('Error in /api/transcribe-voice:', err);
+    res.status(500).json({ error: err.message || 'ভয়েস প্রসেসিং ব্যর্থ হয়েছে।' });
+  }
 });
 
 // ================= VITE MIDDLEWARE & SERVER BOOTSTRAP =================
